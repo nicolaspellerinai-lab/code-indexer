@@ -1,0 +1,29 @@
+{
+  "name": "code-indexer",
+  "version": "1.0.0",
+  "description": "Indexeur de codebase Node.js pour génération de documentation et workflows",
+  "main": "src/pipeline.js",
+  "scripts": {
+    "index": "node scripts/index-project.js",
+    "test": "node scripts/test-index.js",
+    "chroma:start": "docker run -d --name chroma -p 8000:8000 -v $(pwd)/chroma-data:/chroma/chroma chromadb/chroma:latest",
+    "chroma:stop": "docker stop chroma && docker rm chroma",
+    "search": "node scripts/search-endpoints.js",
+    "generate-doc": "node scripts/generate-doc.js"
+  },
+  "dependencies": {
+    "@babel/parser": "^7.23.0",
+    "@babel/traverse": "^7.23.0",
+    "@babel/types": "^7.23.0",
+    "chromadb": "^1.8.0",
+    "chromadb-default-embed": "^2.13.2",
+    "glob": "^10.3.0",
+    "yaml": "^2.3.0"
+  },
+  "devDependencies": {
+    "jest": "^29.7.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
