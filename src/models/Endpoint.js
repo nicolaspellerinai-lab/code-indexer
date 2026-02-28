@@ -18,7 +18,7 @@ class Endpoint {
 
   generateId(data) {
     const method = (data.method || 'GET').toUpperCase();
-    const path = (data.path || '/').replace(///g, '_').replace(/[:{}]/g, '');
+    const path = (data.path || '/').replace(/\//g, '_').replace(/[:{}]/g, '');
     return `${method}_${path}`;
   }
 

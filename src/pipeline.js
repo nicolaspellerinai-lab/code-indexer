@@ -11,7 +11,7 @@ class IndexingPipeline {
     this.analyzer = new DependencyAnalyzer(projectPath);
     this.vectorStore = new VectorStore();
     this.docGenerator = new DocGenerator();
-    this.llmEnricher = new LlmEnricher({ model: 'qwen3.5:latest' }); // Utilise un modèle récent
+    this.llmEnricher = new LlmEnricher({ model: 'qwen2.5-coder:14b', mockMode: false }); // Utilise un modèle récent
   }
 
   async run() {
@@ -25,7 +25,8 @@ class IndexingPipeline {
     console.log(`✨ Found ${this.parser.routes.length} routes`);
 
     console.log('🔗 Phase 2: Analyzing dependencies...');
-    const relationships = this.analyzer.analyze(this.parser.routes);
+    this.analyzer = new DependencyAnalyzer(this.parser.routes, this.projectPath);
+const relationships = this.analyzer.analyze();
 
     console.log('🧠 Phase 3: Enriching with LLM (Ollama)...');
     const isConnected = await this.llmEnricher.checkConnection();
@@ -35,9 +36,12 @@ class IndexingPipeline {
         const route = this.parser.routes[i];
         console.log(`   [${i+1}/${this.parser.routes.length}] Analyzing ${route.method} ${route.path}...`);
         
-        // Enrichissement complet : Résumé, Schéma Input/Output, Exemples
+        // Enrichissement complet
         const enriched = await this.llmEnricher.enrichEndpoint(route);
-        Object.assign(route, enriched);
+        if (enriched.llmEnrichment) {
+             console.log(`   ✅ Enriched summary: ${enriched.llmEnrichment.summary?.substring(0, 50)}...`);
+        }
+        this.parser.routes[i] = enriched;
       }
     } else {
       console.warn('⚠️ Ollama not reachable - skipping LLM enrichment phase');
