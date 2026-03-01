@@ -102,6 +102,7 @@ class RouteParser {
           r.prefix = prefix;
         });
       } else {
+        // Même si pas de préfixe, on définit fullPath = path
         routes.forEach(r => {
           r.fullPath = r.path;
         });
