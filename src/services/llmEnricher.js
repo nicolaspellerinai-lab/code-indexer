@@ -70,7 +70,8 @@ class LlmEnricher {
     return result;
   }
 
-  enrichWithLLM(endpoint, code, jsdoc) {
+  async enrichWithLLM(endpoint, code, jsdoc) {
+    // Fallback static data
     const staticSummary = this.generateStaticSummary(endpoint);
     
     // Analyze code for params
@@ -84,13 +85,23 @@ class LlmEnricher {
     const bodyMatch = code.match(/const\s*\{([^}]+)\}\s*=\s*req\.body/);
     const bodyProps = bodyMatch ? bodyMatch[1].split(',').map(s => s.trim()) : [];
     
-    // Combine with JSDoc
-    const summary = jsdoc.description || staticSummary;
+    // Try LLM enrichment
+    let llmResult = null;
+    try {
+      const prompt = this.buildPrompt(endpoint, code, jsdoc);
+      const response = await this.callOllama(prompt, 500);
+      llmResult = this.parseResponse(response);
+    } catch (e) {
+      console.warn('  ⚠️ LLM enrich failed:', e.message);
+    }
+    
+    // Combine: LLM result > JSDoc > static
+    const finalSummary = llmResult?.summary || jsdoc.description || staticSummary;
     
     return {
       ...endpoint,
       llmEnrichment: {
-        summary: summary,
+        summary: finalSummary,
         inputSchema: {
           query: [...pathParamList, ...Array.from(queryParams)].map(p => ({
             name: p,
@@ -104,10 +115,85 @@ class LlmEnricher {
             properties: bodyProps.reduce((acc, p) => { acc[p] = { type: 'string' }; return acc; }, {})
           } : undefined
         },
-        outputSchema: { type: 'object', properties: {} },
-        examples: jsdoc.examples || []
+        outputSchema: llmResult?.outputSchema || { type: 'object', properties: {} },
+        examples: llmResult?.examples || jsdoc.examples || []
       }
     };
+  }
+
+  buildPrompt(endpoint, code, jsdoc) {
+    const method = endpoint.method;
+    const path = endpoint.fullPath || endpoint.path;
+    const currentSummary = jsdoc.description || this.generateStaticSummary(endpoint);
+    
+    return `Analyze this Express.js endpoint and provide a better summary.
+
+Endpoint: ${method} ${path}
+Current summary: "${currentSummary}"
+
+Code snippet:
+\`\`\`javascript
+${code?.substring(0, 800) || '// No code available'}
+\`\`\`
+
+Provide a JSON response:
+{
+  "summary": "Brief description (10-15 words), avoid 'Endpoint'", 
+  "outputSchema": { "type": "object" }
+}
+
+Return only valid JSON. Example: {"summary": "Authenticate user and return JWT token"}`;
+  }
+
+  async callOllama(prompt, maxTokens) {
+    return new Promise((resolve, reject) => {
+      const body = JSON.stringify({
+        model: this.model,
+        prompt,
+        stream: false,
+        options: { temperature: 0.3, num_predict: maxTokens }
+      });
+
+      const options = {
+        hostname: this.host,
+        port: this.port,
+        path: '/api/generate',
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Content-Length': Buffer.byteLength(body),
+        },
+        timeout: this.timeout,
+      };
+
+      const req = http.request(options, (res) => {
+        let data = '';
+        res.on('data', chunk => data += chunk);
+        res.on('end', () => {
+          try {
+            const parsed = JSON.parse(data);
+            resolve(parsed.response || '');
+          } catch {
+            resolve('');
+          }
+        });
+      });
+      req.on('error', () => resolve(''));
+      req.on('timeout', () => { req.destroy(); resolve(''); });
+      req.write(body);
+      req.end();
+    });
+  }
+
+  parseResponse(response) {
+    try {
+      // Extract JSON
+      const jsonMatch = response.match(/\{[\s\S]*\}/);
+      if (jsonMatch) {
+        return JSON.parse(jsonMatch[0]);
+      }
+    } catch {}
+    return null;
   }
 
   generateStaticSummary(endpoint) {

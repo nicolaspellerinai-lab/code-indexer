@@ -11,7 +11,7 @@ class IndexingPipeline {
     this.analyzer = new DependencyAnalyzer(projectPath);
     this.vectorStore = new VectorStore();
     this.docGenerator = new DocGenerator();
-    this.llmEnricher = new LlmEnricher({ model: 'qwen3:8b', mockMode: false }); // Plus rapide que 14b
+    this.llmEnricher = new LlmEnricher({ model: 'qwen2.5-coder:14b', mockMode: false }); // Meilleure qualité pour code
   }
 
   async run() {
