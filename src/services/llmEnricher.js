@@ -1,3 +1,39 @@
+const http = require('http');
+const fs = require('fs').promises;
+
+class LlmEnricher {
+  constructor(options = {}) {
+    this.model = options.model || 'qwen3:8b';
+    this.host = options.host || 'localhost';
+    this.port = options.port || 11434;
+    this.timeout = options.timeout || 30000;
+    this.mockMode = options.mockMode || false;
+  }
+
+  async checkConnection() {
+    return new Promise((resolve) => {
+      const options = {
+        hostname: this.host,
+        port: this.port,
+        path: '/api/tags',
+        method: 'GET',
+        timeout: 5000,
+      };
+
+      const req = http.request(options, (res) => {
+        resolve(res.statusCode === 200);
+      });
+
+      req.on('error', () => resolve(false));
+      req.on('timeout', () => {
+        req.destroy();
+        resolve(false);
+      });
+
+      req.end();
+    });
+  }
+
   async enrichEndpoint(endpoint, code) {
     if (this.mockMode) {
       return {
@@ -11,18 +47,11 @@
       };
     }
 
-    // Détecte si le code est disponible pour l'analyse
     const codeAvailable = typeof code === 'string' && code.length > 0;
-    
-    // Génération de résumé statique (fallback)
     const staticSummary = this.generateStaticSummary(endpoint, code);
-    
-    // Enrichissement LLM (batch si possible)
     const enriched = await this.callOllamaBatch([endpoint], [codeAvailable ? code : null]);
-    
-    // Fusionne les résultats
     const enrichedData = enriched[0] || {};
-    
+
     return {
       ...endpoint,
       llmEnrichment: {
@@ -34,9 +63,6 @@
     };
   }
 
-  /**
-   * Enrichissement batch pour plusieurs endpoints
-   */
   async callOllamaBatch(endpoints, codes) {
     if (!endpoints || endpoints.length === 0) {
       return [];
@@ -46,13 +72,11 @@
     const validCodes = [];
     const results = [];
 
-    // Filtre les endpoints avec code disponible
     for (let i = 0; i < endpoints.length; i++) {
       if (codes[i]) {
         validEndpoints.push(endpoints[i]);
         validCodes.push(codes[i]);
       } else {
-        // Si pas de code, retourne un résultat vide (sera complété par le résumé statique)
         results.push({});
       }
     }
@@ -61,12 +85,10 @@
       return results;
     }
 
-    // Génération des prompts pour le batch
     const prompts = [];
     for (let i = 0; i < validEndpoints.length; i++) {
       const endpoint = validEndpoints[i];
       const code = validCodes[i];
-      
       const prompt = this.generatePrompt(endpoint, code);
       prompts.push({
         model: this.model,
@@ -80,11 +102,8 @@
     }
 
     try {
-      // Appel batch à Ollama (si supporté)
       const batchResponse = await this.callOllamaBatchAPI(prompts);
-      
-      // Parse les réponses
-      batchResponse.forEach((response, i) > i) {
+      batchResponse.forEach((response, i) => {
         try {
           const enriched = this.parseLLMResponse(response);
           results[validEndpoints.indexOf(validEndpoints[i])] = enriched;
@@ -92,9 +111,7 @@
           results[validEndpoints.indexOf(validEndpoints[i])] = {};
         }
       });
-      
     } catch (e) {
-      // Si le batch échoue, fallback à l'appel séquentiel
       console.warn('⚠️ Batch LLM call failed, falling back to sequential');
       for (let i = 0; i < validEndpoints.length; i++) {
         try {
@@ -113,20 +130,13 @@
     return results;
   }
 
-  /**
-   * Appel batch à l'API Ollama (si supporté)
-   */
   async callOllamaBatchAPI(prompts) {
-    // L'API Ollama ne supporte pas nativement le batch, donc on utilise une approche concurrente
     const promises = prompts.map(prompt => this.callOllamaSingle(prompt.prompt, prompt.options.num_predict));
     return Promise.all(promises);
   }
 
-  /**
-   * Appel unique à Ollama
-   */
   async callOllamaSingle(prompt, maxTokens) {
-    return new Promise((resolve, reject) > {
+    return new Promise((resolve, reject) => {
       const body = JSON.stringify({
         model: this.model,
         prompt,
@@ -149,10 +159,10 @@
         timeout: this.timeout,
       };
 
-      const req = http.request(options, (res) > {
+      const req = http.request(options, (res) => {
         let data = '';
-        res.on('data', chunk > data += chunk);
-        res.on('end', () > {
+        res.on('data', chunk => data += chunk);
+        res.on('end', () => {
           try {
             const parsed = JSON.parse(data);
             resolve(parsed.response || '');
@@ -162,8 +172,8 @@
         });
       });
 
-      req.on('error', () > resolve(''));
-      req.on('timeout', () > {
+      req.on('error', () => resolve(''));
+      req.on('timeout', () => {
         req.destroy();
         resolve('');
       });
@@ -173,9 +183,6 @@
     });
   }
 
-  /**
-   * Enrichissement de plusieurs endpoints en batch
-   */
   async enrichEndpointsBatch(endpoints) {
     if (this.mockMode) {
       return endpoints.map(endpoint => ({
@@ -189,25 +196,21 @@
       }));
     }
 
-    // Lire les fichiers de code
     const codes = [];
     for (const endpoint of endpoints) {
       try {
         const content = await fs.readFile(endpoint.file, 'utf-8');
         codes.push(content);
       } catch (e) {
-        codes.push(''); // Pas de code disponible
+        codes.push('');
       }
     }
 
-    // Enrichissement batch
     const enrichedBatch = await this.callOllamaBatch(endpoints, codes);
-    
-    // Fusionne les résultats
+
     return endpoints.map((endpoint, i) => {
       const enriched = enrichedBatch[i] || {};
       const staticSummary = this.generateStaticSummary(endpoint, codes[i]);
-      
       return {
         ...endpoint,
         llmEnrichment: {
@@ -219,3 +222,47 @@
       };
     });
   }
+
+  generateStaticSummary(endpoint, code) {
+    return `${endpoint.method} ${endpoint.path} - Endpoint ${endpoint.method.toLowerCase()} for ${endpoint.path}`;
+  }
+
+  generatePrompt(endpoint, code) {
+    return `Analyze this Express.js endpoint:
+Method: ${endpoint.method}
+Path: ${endpoint.path}
+
+Code:
+\`\`\`javascript
+${code || '// Code not available'}
+\`\`\`
+
+Provide a JSON response with:
+- summary: Brief description of what this endpoint does
+- inputSchema: Object with query (array) and body (object) properties
+- outputSchema: JSON schema for the response
+- examples: Array with request/response examples
+
+Return only valid JSON.`;
+  }
+
+  parseLLMResponse(response) {
+    try {
+      // Try to parse directly
+      return JSON.parse(response);
+    } catch (e) {
+      // Try to extract JSON from markdown code blocks
+      const jsonMatch = response.match(/```(?:json)?\n?(.*?)\n?```/s);
+      if (jsonMatch) {
+        try {
+          return JSON.parse(jsonMatch[1].trim());
+        } catch (e) {
+          return {};
+        }
+      }
+      return {};
+    }
+  }
+}
+
+module.exports = LlmEnricher;

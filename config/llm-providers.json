@@ -1,0 +1,19 @@
+{
+  "primary": {
+    "provider": "ollama",
+    "host": "localhost",
+    "port": 11434,
+    "model": "qwen3:8b"
+  },
+  "fallback": {
+    "provider": "ollama",
+    "host": "localhost",
+    "port": 11434,
+    "model": "qwen2.5-coder:14b"
+  },
+  "external": {
+    "provider": "openrouter",
+    "apiKey": "${OPENROUTER_API_KEY}",
+    "model": "google/gemini-2.0-flash-001"
+  }
+}
