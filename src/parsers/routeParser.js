@@ -15,6 +15,11 @@ class RouteParser {
     const absProjectPath = path.resolve(this.projectPath);
     
     async function walk(dir) {
+      // Skip node_modules and hidden directories
+      if (path.basename(dir).startsWith('node_modules') || path.basename(dir).startsWith('.')) {
+        return;
+      }
+      
       const entries = await fs.readdir(dir, { withFileTypes: true });
       for (const entry of entries) {
         const fullPath = path.join(dir, entry.name);
