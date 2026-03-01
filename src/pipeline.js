@@ -32,17 +32,15 @@ const relationships = this.analyzer.analyze();
     const isConnected = await this.llmEnricher.checkConnection();
     if (isConnected) {
       console.log(`🤖 Enriching ${this.parser.routes.length} endpoints via LLM...`);
+      
+      // Enrichissement batch (beaucoup plus rapide)
+      const enrichedBatch = await this.llmEnricher.enrichEndpointsBatch(this.parser.routes);
+      console.log(`   ✅ Enriched ${enrichedBatch.length} endpoints in batch mode`);
+      
       for (let i = 0; i < this.parser.routes.length; i++) {
-        const route = this.parser.routes[i];
-        console.log(`   [${i+1}/${this.parser.routes.length}] Analyzing ${route.method} ${route.path}...`);
-        
-        // Enrichissement complet
-        const enriched = await this.llmEnricher.enrichEndpoint(route);
-        if (enriched.llmEnrichment) {
-             console.log(`   ✅ Enriched summary: ${enriched.llmEnrichment.summary?.substring(0, 50)}...`);
-        }
-        this.parser.routes[i] = enriched;
+        this.parser.routes[i] = enrichedBatch[i] || this.parser.routes[i];
       }
+      
     } else {
       console.warn('⚠️ Ollama not reachable - skipping LLM enrichment phase');
     }
