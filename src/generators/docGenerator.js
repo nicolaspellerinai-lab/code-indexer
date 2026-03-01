@@ -1,21 +1,27 @@
 class DocGenerator {
   generateOpenAPI(endpoint) {
-    if (!endpoint.path || !endpoint.method) return {};
+    if (!endpoint.method) return {};
 
     const method = endpoint.method.toLowerCase();
-    const path = endpoint.path.replace(/[:]/g, '{').replace(/\(\w+\)/g, '}'); // Clean path format
+    // Use fullPath if available (from RouteParser), otherwise fallback to path
+    const rawPath = endpoint.fullPath || endpoint.path;
+    if (!rawPath) return {};
+
+    // Convert Express paths like /api/users/:id to OpenAPI paths like /api/users/{id}
+    const path = rawPath.replace(/:([a-zA-Z0-9_]+)/g, '{$1}');
+    
     const llm = endpoint.llmEnrichment || {};
 
-    // Utilise les données LLM si dispos, sinon fallback statique
+    // Use LLM summary if available, otherwise static fallback
     const summary = llm.summary || this.generateSummary(endpoint);
-    const description = (llm.summary ? `${llm.summary}\n\n` : '') + (endpoint.docBlock || `Endpoint ${endpoint.method} ${endpoint.path}`);
+    let description = (llm.summary ? `${llm.summary}\n\n` : '') + (endpoint.docBlock || `Endpoint ${endpoint.method} ${endpoint.path}`);
     
-    // Fusionne les paramètres statiques et LLM
+    // Merge static and LLM parameters
     const parameters = this.mergeParameters(endpoint.parameters, llm.inputSchema?.query);
     const requestBody = this.buildRequestBody(llm.inputSchema?.body);
     const responses = llm.outputSchema || this.buildDefaultResponses();
 
-    // Ajoute les exemples si présents
+    // Add examples if present
     if (llm.examples && Array.isArray(llm.examples)) {
        description += '\n\n### Examples\n' + llm.examples.map(ex => '```json\n' + JSON.stringify(ex, null, 2) + '\n```').join('\n');
     } else if (llm.examples) {
@@ -49,19 +55,21 @@ class DocGenerator {
   mergeParameters(staticParams, llmQueryParams) {
     const params = [];
     
-    // Ajoute les params statiques (path/query)
-    staticParams.forEach(p => {
-      if (p.in === 'path' || p.in === 'query') {
-        params.push({
-          name: p.name,
-          in: p.in,
-          required: p.required || false,
-          schema: { type: 'string' }
-        });
-      }
-    });
+    // Add static params (path/query)
+    if (staticParams) {
+      staticParams.forEach(p => {
+        if (p.in === 'path' || p.in === 'query') {
+          params.push({
+            name: p.name,
+            in: p.in,
+            required: p.required || false,
+            schema: { type: 'string' }
+          });
+        }
+      });
+    }
 
-    // Complète avec LLM query params si absents
+    // Complete with LLM query params if absent
     if (llmQueryParams && llmQueryParams.properties) {
       Object.entries(llmQueryParams.properties).forEach(([name, schema]) => {
         if (!params.find(p => p.name === name && p.in === 'query')) {

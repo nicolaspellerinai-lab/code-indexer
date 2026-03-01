@@ -11,7 +11,7 @@ class IndexingPipeline {
     this.analyzer = new DependencyAnalyzer(projectPath);
     this.vectorStore = new VectorStore();
     this.docGenerator = new DocGenerator();
-    this.llmEnricher = new LlmEnricher({ model: 'qwen2.5-coder:14b', mockMode: false }); // Utilise un modèle récent
+    this.llmEnricher = new LlmEnricher({ model: 'qwen3:8b', mockMode: false }); // Plus rapide que 14b
   }
 
   async run() {
@@ -67,10 +67,12 @@ const relationships = this.analyzer.analyze();
 
     for (const route of this.parser.routes) {
       const doc = this.docGenerator.generateOpenAPI(route);
-      // Merge paths deeply
+      // Merge paths deeply (préserve les méthodes multiples sur le même path)
       for (const [path, methods] of Object.entries(doc)) {
         if (!openAPIDocs.paths[path]) openAPIDocs.paths[path] = {};
-        Object.assign(openAPIDocs.paths[path], methods);
+        for (const [method, spec] of Object.entries(methods)) {
+          openAPIDocs.paths[path][method] = spec;
+        }
       }
     }
 
