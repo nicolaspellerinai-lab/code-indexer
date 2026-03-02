@@ -17,7 +17,7 @@ class DependencyAnalyzer {
       const httpCalls = this.detectHttpCalls(content);
 
       relationships.push({
-        endpoint: `${route.method} ${route.path}`,
+        endpoint: `${route.method} ${route.fullPath || route.path}`,
         database: dbCalls,
         services: serviceCalls,
         externalEndpoints: httpCalls,
