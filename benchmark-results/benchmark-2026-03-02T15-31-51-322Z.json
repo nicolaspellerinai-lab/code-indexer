@@ -1,0 +1,14 @@
+[
+  {
+    "model": "phi3:mini",
+    "score": 0,
+    "time": 125,
+    "error": "Command failed: cat /tmp/ollama-prompt.txt | ollama run phi3:mini\n"
+  },
+  {
+    "model": "qwen2.5-coder:14b",
+    "score": 0,
+    "time": 121,
+    "error": "Command failed: cat /tmp/ollama-prompt.txt | ollama run qwen2.5-coder:14b\n"
+  }
+]

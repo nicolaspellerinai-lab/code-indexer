@@ -1,7 +1,7 @@
 const RouteParser = require('./parsers/routeParser');
 const DependencyAnalyzer = require('./parsers/dependencyAnalyzer');
 const DocGenerator = require('./generators/docGenerator');
-const LlmEnricher = require('./services/llmEnricher');
+const LlmEnricher = require('./services/llmEnricherV2');
 const fs = require('fs').promises;
 const path = require('path');
 
@@ -19,7 +19,7 @@ class IndexingPipeline {
 
     // Initialize components
     this.parser = new RouteParser(this.projectPath);
-    this.enricher = new LlmEnricher({ model: 'qwen3:8b', mockMode: true });
+    this.enricher = new LlmEnricher({ model: 'deepseek-v2:16b', strategy: 'single', mockMode: false });
     this.docGenerator = new DocGenerator();
 
     // Phase 1: Parse routes

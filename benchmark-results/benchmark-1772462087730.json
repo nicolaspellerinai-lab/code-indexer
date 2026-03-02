@@ -1,0 +1,82 @@
+{
+  "date": "2026-03-02T14:34:47.735Z",
+  "system": {
+    "hostname": "MacBook-Pro.local",
+    "ram": "32.0 GB",
+    "cpus": 10
+  },
+  "results": [
+    {
+      "model": "qwen3:8b",
+      "desc": "Rapide, léger",
+      "success": true,
+      "totalTime": 9885,
+      "ollamaTime": "9.85",
+      "loadTime": "2.77",
+      "promptTokens": 128,
+      "promptTime": "0.71",
+      "outputTokens": 150,
+      "outputTime": "6.29",
+      "quality": {
+        "hasValidJSON": false,
+        "hasDescriptiveSummary": false,
+        "mentionsAuth": false,
+        "summary": "",
+        "rawResponse": ""
+      },
+      "hasValidJSON": false,
+      "hasDescriptiveSummary": false,
+      "mentionsAuth": false,
+      "summary": "",
+      "rawResponse": ""
+    },
+    {
+      "model": "qwen2.5-coder:14b",
+      "desc": "Spécialisé code",
+      "success": true,
+      "totalTime": 14984,
+      "ollamaTime": "14.97",
+      "loadTime": "4.74",
+      "promptTokens": 147,
+      "promptTime": "1.53",
+      "outputTokens": 121,
+      "outputTime": "8.64",
+      "quality": {
+        "hasValidJSON": true,
+        "hasDescriptiveSummary": true,
+        "mentionsAuth": true,
+        "summary": "This Express.js endpoint handles a POST request to '/login'. It expects an email",
+        "rawResponse": "```json\n{\n  \"summary\": \"This Express.js endpoint handles a POST request to '/login'. It expects an email and password in the request body. The endpoint attempts to find a user with the provided email "
+      },
+      "hasValidJSON": true,
+      "hasDescriptiveSummary": true,
+      "mentionsAuth": true,
+      "summary": "This Express.js endpoint handles a POST request to '/login'. It expects an email",
+      "rawResponse": "```json\n{\n  \"summary\": \"This Express.js endpoint handles a POST request to '/login'. It expects an email and password in the request body. The endpoint attempts to find a user with the provided email "
+    },
+    {
+      "model": "gpt-oss:20b",
+      "desc": "Grande taille",
+      "success": true,
+      "totalTime": 11447,
+      "ollamaTime": "11.43",
+      "loadTime": "5.44",
+      "promptTokens": 183,
+      "promptTime": "1.73",
+      "outputTokens": 150,
+      "outputTime": "4.14",
+      "quality": {
+        "hasValidJSON": false,
+        "hasDescriptiveSummary": true,
+        "mentionsAuth": true,
+        "summary": "{\"summary\":\"Handles user login by verifying the email, issuing a JWT token, and ",
+        "rawResponse": "{\"summary\":\"Handles user login by verifying the email, issuing a JWT token, and returning the token along with the user's id and email. If the email is not found, it"
+      },
+      "hasValidJSON": false,
+      "hasDescriptiveSummary": true,
+      "mentionsAuth": true,
+      "summary": "{\"summary\":\"Handles user login by verifying the email, issuing a JWT token, and ",
+      "rawResponse": "{\"summary\":\"Handles user login by verifying the email, issuing a JWT token, and returning the token along with the user's id and email. If the email is not found, it"
+    }
+  ]
+}

@@ -108,16 +108,25 @@ async function removeModel(model) {
 }
 
 async function queryModel(model, prompt) {
+  const tempFile = `/tmp/benchmark-${Date.now()}.json`;
   try {
-    const escapedPrompt = prompt.replace(/'/g, "'\\''");
-    const data = JSON.stringify({ model: model.name, prompt: escapedPrompt, stream: false });
+    // Write JSON to temp file to avoid shell escaping issues
+    const data = JSON.stringify({ model: model.name, prompt, stream: false });
+    await fs.writeFile(tempFile, data);
+    
     const { stdout } = await execAsync(
-      `curl -s http://localhost:11434/api/generate -X POST -H "Content-Type: application/json" -d '${data}'`,
+      `curl -s http://localhost:11434/api/generate -X POST -H "Content-Type: application/json" -d @${tempFile}`,
       { timeout: 120000 }
     );
+    
+    // Cleanup temp file
+    try { await fs.unlink(tempFile); } catch {}
+    
     const result = JSON.parse(stdout);
     return { response: result.response || '', tokens: result.eval_count || 0, error: result.error };
   } catch (e) {
+    // Cleanup on error
+    try { await fs.unlink(tempFile); } catch {}
     return { response: '', tokens: 0, error: e.message };
   }
 }

@@ -1,0 +1,8 @@
+[
+  {
+    "model": "phi3:mini",
+    "score": 0,
+    "time": 125,
+    "error": "Command failed: echo 'Analyze this Express.js route endpoint. Respond ONLY with JSON in this exact format:\n{\"summary\": \"brief description\", \"database_table\": \"table_name\", \"http_status\": \"status_code\"}\n\nCode:\nrouter.post('\\''/api/electors/:id/notes'\\'', async (req, res) => {\n  const { id } = req.params;\n  const { note, priority } = req.body;\n  const userId = req.user.id;\n  const result = await db.query(\n    '\\''INSERT INTO elector_notes (elector_id, note, priority, created_by) VALUES (?, ?, ?, ?)'\\'',\n    [id, note, priority, userId]\n  );\n  res.status(201).json({ id: result.insertId, elector_id: id, note, priority });\n});' | ollama run phi3:mini --verbose 2>&1\n"
+  }
+]
