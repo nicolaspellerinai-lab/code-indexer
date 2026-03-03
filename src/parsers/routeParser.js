@@ -94,8 +94,9 @@ class RouteParser {
       const content = await fs.readFile(filePath, 'utf-8');
       const routes = this.extractRoutes(content, filePath);
       
-      // Ajouter le préfixe si trouvé
-      const prefix = this.routePrefixes[filePath] || '';
+      // Résoudre le chemin absolu pour le lookup du préfixe
+      const absPath = path.resolve(filePath);
+      const prefix = this.routePrefixes[absPath] || '';
       if (prefix) {
         routes.forEach(r => {
           r.fullPath = prefix + r.path;

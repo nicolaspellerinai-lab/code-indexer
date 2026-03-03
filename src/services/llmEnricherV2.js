@@ -6,7 +6,7 @@ class LlmEnricherV2 {
     this.model = options.model || 'deepseek-v2:16b'; // 64k context, rapide
     this.host = options.host || 'localhost';
     this.port = options.port || 11434;
-    this.timeout = options.timeout || 60000;
+    this.timeout = options.timeout || 120000; // 2 minutes timeout
     this.mockMode = options.mockMode || false;
     this.strategy = options.strategy || 'single'; // 'single' ou 'multi'
   }
@@ -66,6 +66,12 @@ class LlmEnricherV2 {
 
   // ============ SINGLE PASS STRATEGY ============
   async enrichSinglePass(endpoint, code, jsdoc, parsed) {
+    // Parse ONLY the handler code for this specific route FIRST
+    // This ensures we have accurate params even if LLM fails
+    const routePath = endpoint.path;
+    const handlerCode = this.getHandlerCodePreview(code, routePath, 800, endpoint.method);
+    const handlerParsed = this.parseCode(handlerCode, endpoint);
+    
     const prompt = this.buildSinglePassPrompt(endpoint, code, jsdoc, parsed);
     
     let llmResult = null;
@@ -77,9 +83,10 @@ class LlmEnricherV2 {
     }
 
     if (!llmResult) {
-      return { ...endpoint, llmEnrichment: this.getFallbackEnrichment(endpoint, parsed) };
+      // Use handler-specific parsed data for fallback, not full-file parsed
+      return { ...endpoint, llmEnrichment: this.getFallbackEnrichment(endpoint, handlerParsed) };
     }
-
+    
     return {
       ...endpoint,
       llmEnrichment: {
@@ -88,13 +95,79 @@ class LlmEnricherV2 {
         operationId: llmResult.operationId || this.generateOperationId(endpoint),
         tags: llmResult.tags || this.inferTags(endpoint),
         deprecated: llmResult.deprecated || false,
-        security: llmResult.security || [{ bearerAuth: [] }],
-        inputSchema: this.mergeInputSchema(parsed, llmResult.inputSchema, endpoint.method),
-        outputSchema: llmResult.outputSchema || { type: 'object', properties: {} },
-        responses: llmResult.responses || this.buildDefaultResponses(endpoint, parsed),
-        examples: llmResult.examples || this.generateExamples(endpoint, parsed)
+        // For security: use LLM result only for login/register routes, otherwise use parsed
+        security: this.shouldUseLLMSecurity(endpoint, llmResult) ? llmResult.security : [{ bearerAuth: [] }],
+        // Use parsed data for params - never trust LLM for these
+        inputSchema: this.buildInputSchemaFromParsed(handlerParsed, endpoint.method),
+        // For outputSchema: use LLM only if it has real data, otherwise use parsed
+        outputSchema: this.buildOutputSchemaFromParsed(handlerParsed, llmResult.outputSchema),
+        responses: llmResult.responses || this.buildDefaultResponses(endpoint, handlerParsed),
+        examples: llmResult.examples || this.generateExamples(endpoint, handlerParsed)
       }
     };
+  }
+
+  // ============ HELPERS: Trust parsed data, not LLM ============
+  shouldUseLLMSecurity(endpoint, llmResult) {
+    const path = endpoint.fullPath || endpoint.path;
+    // Use LLM security only for auth routes (login/register)
+    if (path.includes('/auth/login') || path.includes('/auth/register') || path.includes('/login') || path.includes('/register')) {
+      return true;
+    }
+    return false;
+  }
+
+  buildInputSchemaFromParsed(parsed, method) {
+    const httpMethod = (method || 'GET').toUpperCase();
+    const isGet = httpMethod === 'GET';
+    
+    const schema = {
+      path: {},
+      query: {},
+      body: null
+    };
+
+    // Path params
+    for (const p of parsed.pathParams) {
+      schema.path[p] = { type: 'string', required: true };
+    }
+
+    // Query params - ONLY use what was parsed from code
+    for (const p of parsed.queryParams) {
+      schema.query[p] = { type: 'string', required: false };
+    }
+
+    // Body fields - ONLY use what was parsed from code
+    if (!isGet && parsed.bodyFields && parsed.bodyFields.length > 0) {
+      schema.body = {
+        type: 'object',
+        properties: {},
+        required: []
+      };
+      for (const field of parsed.bodyFields) {
+        schema.body.properties[field] = { type: 'string' };
+      }
+    }
+
+    return schema;
+  }
+
+  buildOutputSchemaFromParsed(parsed, llmOutputSchema) {
+    // Use LLM outputSchema only if it has actual properties
+    if (llmOutputSchema && llmOutputSchema.properties && Object.keys(llmOutputSchema.properties).length > 0) {
+      return llmOutputSchema;
+    }
+    
+    // Otherwise use parsed output fields
+    if (parsed.outputFields && parsed.outputFields.length > 0) {
+      const properties = {};
+      for (const field of parsed.outputFields) {
+        properties[field] = { type: 'string' };
+      }
+      return { type: 'object', properties };
+    }
+    
+    return { type: 'object', properties: {} };
   }
 
   // ============ MULTI PASS STRATEGY ============
@@ -129,6 +202,12 @@ class LlmEnricherV2 {
       console.warn('  ⚠️ Pass 3 failed');
     }
 
+    // Parse ONLY the handler code for this specific route, use route path to find it
+    // Use smaller size (800) to only include this handler, not subsequent ones
+    const routePath = endpoint.path;
+    const handlerCode = this.getHandlerCodePreview(code, routePath, 800, endpoint.method);
+    const handlerParsed = this.parseCode(handlerCode, endpoint);
+
     return {
       ...endpoint,
       llmEnrichment: {
@@ -137,11 +216,14 @@ class LlmEnricherV2 {
         operationId: pass1Result?.operationId || this.generateOperationId(endpoint),
         tags: pass1Result?.tags || this.inferTags(endpoint),
         deprecated: pass1Result?.deprecated || false,
-        security: pass1Result?.security || [{ bearerAuth: [] }],
-        inputSchema: this.mergeInputSchema(parsed, pass2Result?.inputSchema, endpoint.method),
-        outputSchema: pass2Result?.outputSchema || { type: 'object', properties: {} },
-        responses: pass3Result?.responses || this.buildDefaultResponses(endpoint, parsed),
-        examples: pass3Result?.examples || this.generateExamples(endpoint, parsed)
+        // For security: use LLM result only for login/register routes
+        security: this.shouldUseLLMSecurity(endpoint, pass1Result) ? pass1Result?.security : [{ bearerAuth: [] }],
+        // Use parsed data for params - never trust LLM for these
+        inputSchema: this.buildInputSchemaFromParsed(handlerParsed, endpoint.method),
+        // Use LLM outputSchema only if it has actual properties
+        outputSchema: this.buildOutputSchemaFromParsed(handlerParsed, pass2Result?.outputSchema),
+        responses: pass3Result?.responses || this.buildDefaultResponses(endpoint, handlerParsed),
+        examples: pass3Result?.examples || this.generateExamples(endpoint, handlerParsed)
       }
     };
   }
@@ -165,6 +247,29 @@ FULL HANDLER CODE:
 \`\`\`javascript
 ${codePreview}
 \`\`\`
+
+ANALYZE THE CODE CAREFULLY. Extract ONLY the parameters that are ACTUALLY USED in the code:
+
+分析方法:
+1. Chercher req.query.NOM pour les query params
+2. Chercher req.params.NOM pour les path params  
+3. Chercher req.body.NOM pour les body fields
+4. Chercher res.json(...) pour outputSchema
+5. Chercher middleware auth/require pour requiresAuth
+
+⚠️ CRITICAL RULES - VERY IMPORTANT:
+- SI req.query n'est PAS utilisé dans le code → queryParams = [] (EMPTY ARRAY)
+- SI req.params n'est PAS utilisé dans le code → pathParams = [] (EMPTY ARRAY)
+- SI req.body n'est PAS utilisé dans le code → bodyFields = [] (EMPTY ARRAY)
+- NE JAMAIS inventer des paramètres qui n'existent pas dans le code
+- NE PAS utiliser de template comme "page, limit, search" sauf si présent dans le code
+- SI c'est une route de login/register → requiresAuth = false
+
+Detected from code analysis:
+- Path params in route: ${JSON.stringify(parsed.pathParams)}
+- Query params used: ${JSON.stringify(parsed.queryParams)}
+- Body fields used: ${JSON.stringify(parsed.bodyFields)}
+- Output fields: ${JSON.stringify(parsed.outputFields)}
 
 Return a JSON object with ALL these fields:
 {
@@ -196,13 +301,7 @@ Return a JSON object with ALL these fields:
   }
 }
 
-Rules:
-- Analyze ALL the handler code, not just a snippet
-- Look for req.params, req.query, req.body patterns
-- Look for res.json(), res.status().json() patterns to infer output
-- Infer security from auth middleware usage
-- Infer proper response codes from error handling (404, 409, etc.)
-- Generate realistic example data based on the fields
+IMPORTANT: Use the detected params from code analysis. If queryParams array is empty, use empty object for query in inputSchema.
 
 Return ONLY valid JSON, no markdown.`;
   }
@@ -219,6 +318,12 @@ Endpoint: ${method} ${path}
 Handler: ${handler}
 Current description: "${jsdoc.description || 'N/A'}"
 
+⚠️ AUTH DETECTION - VERY IMPORTANT:
+- Look for middleware like: auth, require, isAuthenticated, verifyToken
+- Check if route is: /auth/login, /auth/register, /login, /register → requiresAuth = false
+- If auth middleware is used → requiresAuth = true
+- If it's a login/register route → requiresAuth = false
+
 Code:
 \`\`\`javascript
 ${codePreview}
@@ -234,6 +339,8 @@ Return JSON:
   "security": [{"bearerAuth": []}]
 }
 
+If login/register route → "security": [] (no auth required)
+
 Return ONLY JSON.`;
   }
 
@@ -248,14 +355,24 @@ Return ONLY JSON.`;
 Endpoint: ${method} ${path}
 Handler: ${handler}
 
-Detected path params: ${JSON.stringify(parsed.pathParams)}
-Detected query params: ${JSON.stringify(parsed.queryParams)}
-Detected body fields: ${JSON.stringify(parsed.bodyFields)}
+⚠️ CRITICAL - Use ONLY these detected parameters from code analysis:
+- Detected path params: ${JSON.stringify(parsed.pathParams)}
+- Detected query params: ${JSON.stringify(parsed.queryParams)}
+- Detected body fields: ${JSON.stringify(parsed.bodyFields)}
+- Detected output fields: ${JSON.stringify(parsed.outputFields)}
+
+RULES:
+- If queryParams is empty → query = {} (empty object, NOT { "page": {...}, "limit": {...} })
+- If bodyFields is empty → body = null or body not included
+- If outputFields is empty → analyze res.json() calls in the code to find actual output
+- NEVER invent parameters not in the lists above
 
 Code:
 \`\`\`javascript
 ${codePreview}
 \`\`\`
+
+Look at res.json(...) calls in the code to determine outputSchema fields.
 
 Return JSON with inputSchema and outputSchema:
 {
@@ -266,6 +383,8 @@ Return JSON with inputSchema and outputSchema:
   },
   "outputSchema": { "type": "object", "properties": { "id": { "type": "string" } } }
 }
+
+If no params detected, use empty objects: "query": {}
 
 Return ONLY JSON.`;
   }
@@ -316,22 +435,79 @@ Return ONLY JSON.`;
     }
   }
 
-  getHandlerCodePreview(code, handlerName, maxChars) {
-    if (!code || !handlerName) return code?.substring(0, maxChars) || '';
+  getHandlerCodePreview(code, routePath, maxChars, httpMethod) {
+    if (!code || !routePath) return code?.substring(0, maxChars) || '';
     
-    // Try to extract just the handler function
-    const patterns = [
-      new RegExp(`router\\.(get|post|put|patch|delete|options)\\s*\\([^)]+,\\s*(${handlerName}|async\\s+(${handlerName}|function)?\\s*\\([^)]*\\))`, 's'),
-      new RegExp(`function\\s+${handlerName}\\s*\\([^)]*\\)`),
-      new RegExp(`const\\s+${handlerName}\\s*=`),
-      new RegExp(`module\\.exports\\s*=[\\s\\S]*?function\\s+${handlerName}`),
+    // Clean the route path (remove leading/trailing slashes)
+    const cleanPath = routePath.replace(/^\//, '').replace(/\//g, '\\/');
+    const method = (httpMethod || 'get').toLowerCase();
+    
+    // Try to find the route by its path AND method (e.g., router.get('/stats', ...)
+    // This is more precise and handles routes with same path but different methods
+    const routePattern = new RegExp(`router\\.${method}\\s*\\(\\s*['"\`]/${cleanPath}['"\`]`, 's');
+    let match = code.match(routePattern);
+    
+    if (match) {
+      const idx = match.index;
+      const start = Math.max(0, idx - 100);
+      const preview = code.substring(start, start + maxChars + 100);
+      return preview;
+    }
+    
+    // Try without leading slash
+    const routePattern2 = new RegExp(`router\\.${method}\\s*\\(\\s*['"\`]${cleanPath}['"\`]`, 's');
+    match = code.match(routePattern2);
+    
+    if (match) {
+      const idx = match.index;
+      const start = Math.max(0, idx - 100);
+      const preview = code.substring(start, start + maxChars + 100);
+      return preview;
+    }
+    
+    // Try with middleware array: router.get('/', [auth, check(...)] ...
+    const routePattern3 = new RegExp(`router\\.${method}\\s*\\(\\s*['"\`]${cleanPath}['"\`]\\s*,\\s*\\[`, 's');
+    match = code.match(routePattern3);
+    
+    if (match) {
+      const idx = match.index;
+      const start = Math.max(0, idx - 100);
+      const preview = code.substring(start, start + maxChars + 100);
+      return preview;
+    }
+    
+    // Try any method if specific one fails - look for the path pattern anywhere in the file
+    const anyMethodPattern = new RegExp(`router\\.(get|post|put|patch|delete|options)\\s*\\(\\s*['"\`]/${cleanPath}['"\`]`, 's');
+    match = code.match(anyMethodPattern);
+    
+    if (match) {
+      const idx = match.index;
+      const start = Math.max(0, idx - 100);
+      const preview = code.substring(start, start + maxChars + 100);
+      return preview;
+    }
+    
+    // Try with any method without leading slash
+    const anyMethodPattern2 = new RegExp(`router\\.(get|post|put|patch|delete|options)\\s*\\(\\s*['"\`]${cleanPath}['"\`]`, 's');
+    match = code.match(anyMethodPattern2);
+    
+    if (match) {
+      const idx = match.index;
+      const start = Math.max(0, idx - 100);
+      const preview = code.substring(start, start + maxChars + 100);
+      return preview;
+    }
+    
+    // Fallback: try handler name patterns
+    const handlerPatterns = [
+      new RegExp(`router\\.(get|post|put|patch|delete|options)\\s*\\([^)]+,\\s*(${routePath}|async\\s+(${routePath}|function)?\\s*\\([^)]*\\))`, 's'),
+      new RegExp(`function\\s+${routePath}\\s*\\([^)]*\\)`),
     ];
     
-    for (const pattern of patterns) {
-      const match = code.match(pattern);
-      if (match) {
-        // Get surrounding context (500 chars before, maxChars after)
-        const idx = match.index;
+    for (const pattern of handlerPatterns) {
+      const m = code.match(pattern);
+      if (m) {
+        const idx = m.index;
         const start = Math.max(0, idx - 200);
         const preview = code.substring(start, start + maxChars + 200);
         if (preview.length > 500) return preview;
@@ -339,7 +515,7 @@ Return ONLY JSON.`;
       }
     }
     
-    // Fallback: just take first maxChars
+    // Final fallback: just take first maxChars
     return code.substring(0, maxChars);
   }
 
