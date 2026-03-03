@@ -98,7 +98,8 @@ class LlmEnricherV2 {
         // For security: use LLM result only for login/register routes, otherwise use parsed
         security: this.shouldUseLLMSecurity(endpoint, llmResult) ? llmResult.security : [{ bearerAuth: [] }],
         // Use parsed data for params - never trust LLM for these
-        inputSchema: this.buildInputSchemaFromParsed(handlerParsed, endpoint.method),
+        // Filter by actual presence in handler code to remove extras
+        inputSchema: this.buildInputSchemaFromParsed(handlerParsed, endpoint.method, handlerCode),
         // For outputSchema: use LLM only if it has real data, otherwise use parsed
         outputSchema: this.buildOutputSchemaFromParsed(handlerParsed, llmResult.outputSchema),
         responses: llmResult.responses || this.buildDefaultResponses(endpoint, handlerParsed),
@@ -117,7 +118,13 @@ class LlmEnricherV2 {
     return false;
   }
 
-  buildInputSchemaFromParsed(parsed, method) {
+  // Filter parameters to only include those that actually appear in the handler code
+  filterParamsByCode(params, handlerCode) {
+    if (!handlerCode || !params) return [];
+    return params.filter(p => handlerCode.includes(p));
+  }
+
+  buildInputSchemaFromParsed(parsed, method, handlerCode) {
     const httpMethod = (method || 'GET').toUpperCase();
     const isGet = httpMethod === 'GET';
     
@@ -127,24 +134,21 @@ class LlmEnricherV2 {
       body: null
     };
 
-    // Path params
-    for (const p of parsed.pathParams) {
-      schema.path[p] = { type: 'string', required: true };
-    }
-
-    // Query params - ONLY use what was parsed from code
-    for (const p of parsed.queryParams) {
+    // Filter query params by actual presence in handler code
+    const validQueryParams = this.filterParamsByCode(parsed.queryParams, handlerCode);
+    for (const p of validQueryParams) {
       schema.query[p] = { type: 'string', required: false };
     }
 
-    // Body fields - ONLY use what was parsed from code
-    if (!isGet && parsed.bodyFields && parsed.bodyFields.length > 0) {
+    // Filter body fields by actual presence in handler code
+    const validBodyFields = this.filterParamsByCode(parsed.bodyFields, handlerCode);
+    if (!isGet && validBodyFields && validBodyFields.length > 0) {
       schema.body = {
         type: 'object',
         properties: {},
         required: []
       };
-      for (const field of parsed.bodyFields) {
+      for (const field of validBodyFields) {
         schema.body.properties[field] = { type: 'string' };
       }
     }
@@ -219,7 +223,8 @@ class LlmEnricherV2 {
         // For security: use LLM result only for login/register routes
         security: this.shouldUseLLMSecurity(endpoint, pass1Result) ? pass1Result?.security : [{ bearerAuth: [] }],
         // Use parsed data for params - never trust LLM for these
-        inputSchema: this.buildInputSchemaFromParsed(handlerParsed, endpoint.method),
+        // Filter by actual presence in handler code to remove extras
+        inputSchema: this.buildInputSchemaFromParsed(handlerParsed, endpoint.method, handlerCode),
         // Use LLM outputSchema only if it has actual properties
         outputSchema: this.buildOutputSchemaFromParsed(handlerParsed, pass2Result?.outputSchema),
         responses: pass3Result?.responses || this.buildDefaultResponses(endpoint, handlerParsed),
