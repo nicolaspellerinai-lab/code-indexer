@@ -438,85 +438,52 @@ Return ONLY JSON.`;
   getHandlerCodePreview(code, routePath, maxChars, httpMethod) {
     if (!code || !routePath) return code?.substring(0, maxChars) || '';
     
-    // Clean the route path (remove leading/trailing slashes)
+    // Clean the route path
     const cleanPath = routePath.replace(/^\//, '').replace(/\//g, '\\/');
     const method = (httpMethod || 'get').toLowerCase();
     
-    // Try to find the route by its path AND method (e.g., router.get('/stats', ...)
-    // This is more precise and handles routes with same path but different methods
-    const routePattern = new RegExp(`router\\.${method}\\s*\\(\\s*['"\`]/${cleanPath}['"\`]`, 's');
+    // Try to find the route definition - exact match with method first
+    let routePattern = new RegExp(`router\\.${method}\\s*\\(\\s*['"\`]/${cleanPath}['"\`]`, 's');
     let match = code.match(routePattern);
     
-    if (match) {
-      const idx = match.index;
-      const start = Math.max(0, idx - 100);
-      const preview = code.substring(start, start + maxChars + 100);
-      return preview;
+    if (!match) {
+      // Try without leading slash
+      routePattern = new RegExp(`router\\.${method}\\s*\\(\\s*['"\`]${cleanPath}['"\`]`, 's');
+      match = code.match(routePattern);
     }
     
-    // Try without leading slash
-    const routePattern2 = new RegExp(`router\\.${method}\\s*\\(\\s*['"\`]${cleanPath}['"\`]`, 's');
-    match = code.match(routePattern2);
-    
-    if (match) {
-      const idx = match.index;
-      const start = Math.max(0, idx - 100);
-      const preview = code.substring(start, start + maxChars + 100);
-      return preview;
+    if (!match) {
+      // Try with middleware array
+      routePattern = new RegExp(`router\\.${method}\\s*\\(\\s*['"\`]${cleanPath}['"\`]\\s*,\\s*\\[`, 's');
+      match = code.match(routePattern);
     }
     
-    // Try with middleware array: router.get('/', [auth, check(...)] ...
-    const routePattern3 = new RegExp(`router\\.${method}\\s*\\(\\s*['"\`]${cleanPath}['"\`]\\s*,\\s*\\[`, 's');
-    match = code.match(routePattern3);
-    
-    if (match) {
-      const idx = match.index;
-      const start = Math.max(0, idx - 100);
-      const preview = code.substring(start, start + maxChars + 100);
-      return preview;
+    if (!match) {
+      // Try any method
+      routePattern = new RegExp(`router\\.(get|post|put|patch|delete|options)\\s*\\(\\s*['"\`]${cleanPath}['"\`]`, 's');
+      match = code.match(routePattern);
     }
     
-    // Try any method if specific one fails - look for the path pattern anywhere in the file
-    const anyMethodPattern = new RegExp(`router\\.(get|post|put|patch|delete|options)\\s*\\(\\s*['"\`]/${cleanPath}['"\`]`, 's');
-    match = code.match(anyMethodPattern);
-    
-    if (match) {
-      const idx = match.index;
-      const start = Math.max(0, idx - 100);
-      const preview = code.substring(start, start + maxChars + 100);
-      return preview;
+    if (!match) {
+      return code.substring(0, maxChars);
     }
     
-    // Try with any method without leading slash
-    const anyMethodPattern2 = new RegExp(`router\\.(get|post|put|patch|delete|options)\\s*\\(\\s*['"\`]${cleanPath}['"\`]`, 's');
-    match = code.match(anyMethodPattern2);
+    const matchIdx = match.index;
     
-    if (match) {
-      const idx = match.index;
-      const start = Math.max(0, idx - 100);
-      const preview = code.substring(start, start + maxChars + 100);
-      return preview;
+    // Include 400 chars before (for destructuring like const { page } = req.query)
+    const startIdx = Math.max(0, matchIdx - 400);
+    // Up to maxChars after the match
+    let endIdx = matchIdx + maxChars;
+    
+    // Try to find where this handler ends by looking for the next route definition
+    const remainingCode = code.substring(matchIdx + 100);
+    const nextRouteMatch = remainingCode.match(/\n(router|module\.exports)/);
+    if (nextRouteMatch && nextRouteMatch.index < maxChars) {
+      endIdx = matchIdx + 100 + nextRouteMatch.index;
     }
     
-    // Fallback: try handler name patterns
-    const handlerPatterns = [
-      new RegExp(`router\\.(get|post|put|patch|delete|options)\\s*\\([^)]+,\\s*(${routePath}|async\\s+(${routePath}|function)?\\s*\\([^)]*\\))`, 's'),
-      new RegExp(`function\\s+${routePath}\\s*\\([^)]*\\)`),
-    ];
-    
-    for (const pattern of handlerPatterns) {
-      const m = code.match(pattern);
-      if (m) {
-        const idx = m.index;
-        const start = Math.max(0, idx - 200);
-        const preview = code.substring(start, start + maxChars + 200);
-        if (preview.length > 500) return preview;
-        return preview;
-      }
-    }
-    
-    // Final fallback: just take first maxChars
-    return code.substring(0, maxChars);
+    const preview = code.substring(startIdx, endIdx);
+    return preview;
   }
 
   extractJSDoc(docBlock) {
