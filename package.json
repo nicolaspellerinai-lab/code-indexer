@@ -6,6 +6,10 @@
   "scripts": {
     "index": "node scripts/index-project.js",
     "test": "node scripts/test-index.js",
+    "test:unit": "node tests/unit/routeParser.test.js",
+    "test:mocha": "mocha 'tests/**/*.test.js' --timeout 10000",
+    "benchmark": "node benchmark/runBenchmark.js",
+    "benchmark:ollama": "node benchmark/runOllamaBenchmark.js",
     "chroma:start": "docker run -d --name chroma -p 8000:8000 -v $(pwd)/chroma-data:/chroma/chroma chromadb/chroma:latest",
     "chroma:stop": "docker stop chroma && docker rm chroma",
     "search": "node scripts/search-endpoints.js",
@@ -21,7 +25,8 @@
     "yaml": "^2.3.0"
   },
   "devDependencies": {
-    "jest": "^29.7.0"
+    "jest": "^29.7.0",
+    "mocha": "^10.0.0"
   },
   "engines": {
     "node": ">=18.0.0"

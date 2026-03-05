@@ -1,3 +1,7 @@
+# custom
+datas_tests/
+plans/
+benchmark-results/
 # Dependencies
 node_modules/
 package-lock.json

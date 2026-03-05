@@ -1,212 +1,477 @@
-const fs = require('fs').promises;
+/**
+ * RouteParser - Parser de routes basé sur AST Babel
+ * Supporte Express, NestJS, Fastify et Koa
+ */
+
+const parser = require('@babel/parser');
+const traverse = require('@babel/traverse').default;
+const types = require('@babel/types');
 const path = require('path');
 
 class RouteParser {
-  constructor(projectPath) {
+  constructor(projectPath = null) {
     this.projectPath = projectPath;
-    this.routes = [];
-    this.parsedFiles = new Set();
-    this.routePrefixes = {}; // Map: fichier -> préfixe complet
+    this.endpoints = [];
+    this.framework = 'unknown';
   }
 
-  async findRouteFiles() {
-    const files = [];
-    // Convert projectPath to absolute
-    const absProjectPath = path.resolve(this.projectPath);
+  /**
+   * Parse un fichier source et extrait les routes
+   * @param {string} filePath - Chemin du fichier
+   * @param {string} sourceCode - Code source du fichier
+   * @returns {Endpoint[]} Tableau des endpoints trouvés
+   */
+  parse(filePath, sourceCode) {
+    this.endpoints = [];
+    this.framework = 'unknown';
     
-    async function walk(dir) {
-      // Skip node_modules and hidden directories
-      if (path.basename(dir).startsWith('node_modules') || path.basename(dir).startsWith('.')) {
-        return;
-      }
-      
-      const entries = await fs.readdir(dir, { withFileTypes: true });
-      for (const entry of entries) {
-        const fullPath = path.join(dir, entry.name);
-        if (entry.isDirectory()) {
-          await walk(fullPath);
-        } else if (entry.name.endsWith('.js') || entry.name.endsWith('.ts')) {
-          files.push(path.resolve(fullPath)); // Always use absolute paths
-        }
-      }
+    if (!sourceCode || typeof sourceCode !== 'string') {
+      console.warn(`⚠️ No source code provided for ${filePath}`);
+      return this.endpoints;
     }
-    await walk(absProjectPath);
-
-    // 1. Analyze app.js/main file pour trouver les préfixes
-    await this.extractRoutePrefixes(files);
-
-    // Filtre les fichiers qui pourraient contenir des routes
-    const routeFiles = files.filter(f => {
-      const basename = path.basename(f);
-      const isRouteFile = basename.includes('route') || basename.includes('api') || basename.includes('controller') || f.includes('routes') || f.includes('controllers');
-      const isMainFile = ['app.js', 'index.js', 'server.js'].includes(basename);
-      return isRouteFile && !isMainFile;
-    });
-
-    console.log('📁 Found route files:', routeFiles);
-    console.log('🔗 Route prefixes:', this.routePrefixes);
-    return routeFiles;
-  }
-
-  async extractRoutePrefixes(files) {
-    const mainFiles = files.filter(f => {
-      const basename = path.basename(f);
-      return ['app.js', 'index.js', 'server.js'].includes(basename);
-    });
-
-    for (const file of mainFiles) {
-      try {
-        const content = await fs.readFile(file, 'utf-8');
-        const fileDir = path.dirname(file);
-        
-        // Pattern: const xxxRoutes = require('./routes/xxx')
-        const importPattern = /const\s+(\w+Routes?)\s*=\s*require\s*\(['"]([^'")]+)['"]\)/g;
-        const imports = {};
-        let match;
-        while ((match = importPattern.exec(content)) !== null) {
-          const varName = match[1];
-          const reqPath = match[2];
-          const fullPath = path.resolve(fileDir, reqPath) + '.js';
-          imports[varName] = fullPath;
-        }
-
-        // Pattern: app.use('/prefix', xxxRoutes)
-        const usePattern = /app\.use\s*\(\s*['"]([^'"]+)['"],\s*(\w+Routes?)\s*\)/g;
-        while ((match = usePattern.exec(content)) !== null) {
-          const prefix = match[1];
-          const varName = match[2];
-          if (imports[varName]) {
-            this.routePrefixes[imports[varName]] = prefix;
-            console.log(`  ✓ Mapped: ${path.basename(imports[varName])} -> ${prefix}`);
-          }
-        }
-      } catch (e) {
-        console.warn(`⚠️ Error parsing ${file}: ${e.message}`);
-      }
-    }
-  }
-
-  async parseFile(filePath) {
-    if (this.parsedFiles.has(filePath)) return [];
-    this.parsedFiles.add(filePath);
 
     try {
-      const content = await fs.readFile(filePath, 'utf-8');
-      const routes = this.extractRoutes(content, filePath);
+      // Détecter le framework
+      this.detectFramework(sourceCode);
       
-      // Résoudre le chemin absolu pour le lookup du préfixe
-      const absPath = path.resolve(filePath);
-      const prefix = this.routePrefixes[absPath] || '';
-      if (prefix) {
-        routes.forEach(r => {
-          r.fullPath = prefix + r.path;
-          r.prefix = prefix;
-        });
-      } else {
-        // Même si pas de préfixe, on définit fullPath = path
-        routes.forEach(r => {
-          r.fullPath = r.path;
-        });
+      // Parser le code en AST
+      const ast = this.parseAST(sourceCode, filePath);
+      if (!ast) {
+        return this.endpoints;
       }
       
-      this.routes.push(...routes);
-      return routes;
-    } catch (e) {
-      console.warn(`⚠️ Erreur parsing ${filePath}:`, e.message);
+      // Extraire les routes selon le framework
+      this.traverseAST(ast, sourceCode, filePath);
+      
+    } catch (error) {
+      console.error(`❌ Error parsing ${filePath}:`, error.message);
+    }
+    
+    return this.endpoints;
+  }
+
+  /**
+   * Parse le code source en AST
+   */
+  parseAST(sourceCode, filePath) {
+    try {
+      return parser.parse(sourceCode, {
+        sourceType: 'module',
+        plugins: [
+          'jsx',
+          'dynamicImport', 
+          'exportDefaultFrom',
+          'decorators-legacy',
+          'classProperties'
+        ],
+        sourceFilename: filePath
+      });
+    } catch (error) {
+      // Essayer sans les plugins optionnels
+      try {
+        return parser.parse(sourceCode, {
+          sourceType: 'module',
+          sourceFilename: filePath
+        });
+      } catch (fallbackError) {
+        console.error(`❌ AST parsing failed for ${filePath}:`, fallbackError.message);
+        return null;
+      }
+    }
+  }
+
+  /**
+   * Détecte le framework utilisé dans le fichier
+   */
+  detectFramework(sourceCode) {
+    if (sourceCode.includes('express.Router') || sourceCode.includes('router.get') || sourceCode.includes('router.post')) {
+      this.framework = 'express';
+    } else if (sourceCode.includes('@Controller') || sourceCode.includes('@Get(') || sourceCode.includes('@Post(')) {
+      this.framework = 'nestjs';
+    } else if (sourceCode.includes('fastify.get') || sourceCode.includes('fastify.post')) {
+      this.framework = 'fastify';
+    } else if (sourceCode.includes('koa-router') || sourceCode.includes('Router')) {
+      this.framework = 'koa';
+    } else {
+      this.framework = 'express'; // Default fallback
+    }
+    console.log(`  🔍 Framework détecté: ${this.framework}`);
+  }
+
+  /**
+   * Parcourt l'AST pour trouver les routes
+   */
+  traverseAST(ast, sourceCode, filePath) {
+    const self = this;
+    
+    traverse(ast, {
+      // Pour Express: router.get('/path', middleware1, middleware2, handler)
+      CallExpression(path) {
+        const callee = path.get('callee');
+        
+        if (!callee.node) return;
+        
+        // Vérifier si c'est un appel de méthode de route
+        if (types.isMemberExpression(callee.node)) {
+          const object = callee.get('object');
+          const property = callee.get('property');
+          
+          // Extraire le nom du router (router, app, etc.)
+          let routerName = null;
+          if (types.isIdentifier(object.node)) {
+            routerName = object.node.name;
+          }
+          
+          // Méthodes HTTP supportées
+          const httpMethods = ['get', 'post', 'put', 'delete', 'patch', 'head', 'options'];
+          const method = property.node?.name?.toLowerCase();
+          
+          if (httpMethods.includes(method)) {
+            // Extraire le chemin
+            const pathArg = path.get('arguments')[0];
+            let routePath = self.extractRoutePath(pathArg);
+            
+            if (!routePath) return;
+            
+            // Extraire les middleware
+            const middleware = self.extractMiddleware(path, sourceCode);
+            
+            // Extraire le handler (fonction)
+            const handler = self.extractHandler(path);
+            
+            // Créer l'endpoint
+            const endpoint = {
+              id: `${method.toUpperCase()}-${routePath}`.replace(/[^a-zA-Z0-9-]/g, '-'),
+              path: routePath,
+              method: method.toUpperCase(),
+              file: filePath || '',
+              line: path.node.loc?.start?.line || 0,
+              framework: self.framework,
+              middleware: middleware.names,
+              middlewareLines: middleware.lines,
+              handler: handler,
+              description: '',
+              parameters: [],
+              responses: [],
+              tags: [],
+              dependencies: []
+            };
+            
+            self.endpoints.push(endpoint);
+          }
+        }
+        
+        // Pour NestJS: @Get('/path') decorator (traité séparément via Decorator)
+      }
+    });
+    
+    // Traiter les décorateurs NestJS séparément
+    this.extractNestJSRoutes(ast, sourceCode, filePath);
+  }
+
+  /**
+   * Extrait les routes NestJS via les décorateurs
+   */
+  extractNestJSRoutes(ast, sourceCode, filePath) {
+    const self = this;
+    let controllerPath = '';
+    
+    traverse(ast, {
+      // Trouver le chemin du Controller
+      ClassDeclaration(path) {
+        if (path.node.decorators) {
+          for (const decorator of path.node.decorators) {
+            if (types.isCallExpression(decorator.expression) && 
+                types.isIdentifier(decorator.expression.callee) &&
+                decorator.expression.callee.name === 'Controller') {
+              // Extraire le chemin du controller
+              const args = decorator.expression.arguments || [];
+              if (args.length > 0 && types.isStringLiteral(args[0])) {
+                controllerPath = args[0].value;
+              }
+            }
+          }
+        }
+      },
+      
+      // Trouver les méthodes avec décorateurs HTTP
+      ClassMethod(path) {
+        if (path.node.decorators) {
+          for (const decorator of path.node.decorators) {
+            let httpMethod = null;
+            let routePath = '';
+            
+            if (types.isCallExpression(decorator.expression) && 
+                types.isIdentifier(decorator.expression.callee)) {
+              const decoratorName = decorator.expression.callee.name;
+              
+              if (['Get', 'Post', 'Put', 'Delete', 'Patch', 'Head', 'Options'].includes(decoratorName)) {
+                httpMethod = decoratorName.toUpperCase();
+                
+                // Extraire le chemin de la route
+                const args = decorator.expression.arguments || [];
+                if (args.length > 0 && types.isStringLiteral(args[0])) {
+                  routePath = args[0].value;
+                }
+              }
+            }
+            
+            if (httpMethod) {
+              const fullPath = controllerPath + (routePath || '');
+              const methodName = path.node.key?.name || 'anonymous';
+              
+              self.endpoints.push({
+                id: `${httpMethod}-${fullPath}`.replace(/[^a-zA-Z0-9-]/g, '-'),
+                path: fullPath,
+                method: httpMethod,
+                file: filePath || '',
+                line: path.node.loc?.start?.line || 0,
+                framework: 'nestjs',
+                middleware: [],
+                middlewareLines: [],
+                handler: {
+                  type: 'method',
+                  name: methodName,
+                  line: path.node.loc?.start?.line || 0
+                },
+                description: '',
+                parameters: [],
+                responses: [],
+                tags: [],
+                dependencies: []
+              });
+            }
+          }
+        }
+      }
+    });
+  }
+
+  /**
+   * Extrait le chemin de la route depuis un argument
+   */
+  extractRoutePath(pathArg) {
+    if (!pathArg || !pathArg.node) return '/';
+    
+    const node = pathArg.node;
+    
+    if (types.isStringLiteral(node)) {
+      return node.value;
+    }
+    
+    if (types.isTemplateLiteral(node)) {
+      // Gérer les template literals simples
+      if (node.quasis && node.quasis.length > 0) {
+        return node.quasis[0].value.cooked;
+      }
+    }
+    
+    // Pour les variables dynamiques (non supporté complètement)
+    return null;
+  }
+
+  /**
+   * Extrait les noms et lignes des middleware
+   */
+  extractMiddleware(path, sourceCode) {
+    const middleware = [];
+    const middlewareLines = [];
+    
+    // Les arguments entre le chemin et le handler sont des middleware
+    const args = path.get('arguments');
+    
+    if (!args || args.length < 3) {
+      return { names: middleware, lines: middlewareLines };
+    }
+    
+    // Les arguments 1 à length-1 sont des middleware (sauf le dernier qui est le handler)
+    for (let i = 1; i < args.length - 1; i++) {
+      const arg = args[i];
+      const node = arg?.node;
+      
+      if (!node) continue;
+      
+      if (types.isIdentifier(node)) {
+        middleware.push(node.name);
+        middlewareLines.push(node.loc?.start?.line || 0);
+      } else if (types.isArrayExpression(node)) {
+        // Gérer les tableaux de middleware comme [auth, validatePermission(...)]
+        if (node.elements) {
+          node.elements.forEach(elem => {
+            if (!elem) return;
+            
+            if (types.isIdentifier(elem)) {
+              middleware.push(elem.name);
+              middlewareLines.push(elem.loc?.start?.line || 0);
+            } else if (types.isCallExpression(elem)) {
+              // Appels de fonction comme validatePermission([['elector', 'view']])
+              if (types.isIdentifier(elem.callee)) {
+                middleware.push(elem.callee.name);
+                middlewareLines.push(elem.loc?.start?.line || 0);
+              }
+            }
+          });
+        }
+      } else if (types.isCallExpression(node)) {
+        // Appels de fonction middleware
+        if (types.isIdentifier(node.callee)) {
+          middleware.push(node.callee.name);
+          middlewareLines.push(node.loc?.start?.line || 0);
+        }
+      }
+    }
+    
+    return { names: middleware, lines: middlewareLines };
+  }
+
+  /**
+   * Extrait le handler de la route (dernier argument)
+   */
+  extractHandler(path) {
+    const args = path.get('arguments');
+    const handlerArg = args[args.length - 1];
+    
+    if (!handlerArg || !handlerArg.node) return null;
+    
+    const node = handlerArg.node;
+    
+    if (types.isIdentifier(node)) {
+      return {
+        type: 'reference',
+        name: node.name,
+        line: node.loc?.start?.line || 0
+      };
+    }
+    
+    if (types.isFunctionExpression(node) || types.isArrowFunctionExpression(node)) {
+      // Essayer d'extraire le nom de la fonction
+      const parent = path.parent;
+      let functionName = 'anonymous';
+      
+      if (parent && types.isVariableDeclarator(parent.node)) {
+        functionName = parent.node.id?.name || 'anonymous';
+      }
+      
+      return {
+        type: 'inline',
+        name: functionName,
+        line: node.loc?.start?.line || 0,
+        params: this.extractFunctionParams(node),
+        body: this.extractFunctionBody(node)
+      };
+    }
+    
+    return null;
+  }
+
+  /**
+   * Extrait les paramètres d'une fonction
+   */
+  extractFunctionParams(node) {
+    if (!node.params) return [];
+    
+    return node.params.map(param => {
+      if (types.isIdentifier(param)) {
+        return { name: param.name, type: 'unknown' };
+      }
+      if (types.isAssignmentPattern(param)) {
+        return {
+          name: param.left?.name || 'param',
+          type: 'optional',
+          default: this.extractDefaultValue(param.right)
+        };
+      }
+      return { name: 'param', type: 'unknown' };
+    });
+  }
+
+  /**
+   * Extrait la valeur par défaut d'un paramètre
+   */
+  extractDefaultValue(node) {
+    if (!node) return undefined;
+    
+    if (types.isStringLiteral(node)) return node.value;
+    if (types.isNumericLiteral(node)) return node.value;
+    if (types.isBooleanLiteral(node)) return node.value;
+    if (types.isNullLiteral(node)) return null;
+    
+    return undefined;
+  }
+
+  /**
+   * Extrait le corps de la fonction pour analyse des dépendances
+   */
+  extractFunctionBody(node) {
+    if (!node.body) return null;
+    
+    const body = node.body;
+    const calls = [];
+    
+    if (types.isBlockStatement(body)) {
+      body.body.forEach(statement => {
+        if (types.isExpressionStatement(statement)) {
+          let expr = statement.expression;
+          if (types.isAwaitExpression(expr)) {
+            expr = expr.argument;
+          }
+          if (types.isCallExpression(expr)) {
+            let calleeName = null;
+            if (types.isIdentifier(expr.callee)) {
+              calleeName = expr.callee.name;
+            } else if (types.isMemberExpression(expr.callee)) {
+              // db.User.findAll -> db.User
+              const obj = expr.callee.object;
+              const prop = expr.callee.property;
+              if (types.isIdentifier(obj) && types.isIdentifier(prop)) {
+                calleeName = `${obj.name}.${prop.name}`;
+              }
+            }
+            
+            if (calleeName) {
+              calls.push({
+                name: calleeName,
+                line: expr.loc?.start?.line || 0
+              });
+            }
+          }
+        }
+      });
+    }
+    
+    return calls;
+  }
+
+  /**
+   * Méthode de compatibilité avec l'API existante
+   */
+  async findRouteFiles() {
+    // Cette méthode est conservée pour la compatibilité
+    // mais le parsing AST ne nécessite plus de filtrage préalable
+    return [];
+  }
+
+  /**
+   * Méthode de compatibilité pour parser un fichier
+   */
+  async parseFile(filePath) {
+    const fs = require('fs').promises;
+    try {
+      const content = await fs.readFile(filePath, 'utf-8');
+      return this.parse(filePath, content);
+    } catch (error) {
+      console.error(`❌ Error reading ${filePath}:`, error.message);
       return [];
     }
   }
 
-  extractRoutes(content, filePath) {
-    const routes = [];
-    const lines = content.split('\n');
-
-    // Patterns plus robustes pour Express
-    const patterns = [
-      // router.get('/path', ...)
-      /router\.(get|post|put|delete|patch|head|options)\s*\(\s*['"`]/gi,
-      // app.get('/path', ...)
-      /app\.(get|post|put|delete|patch|head|options)\s*\(\s*['"`]/gi,
-      // app.use('/path', routes)
-      /app\.use\s*\(\s*['"`]([^'"`]+)['"`]/gi,
-    ];
-
-    for (let i = 0; i < lines.length; i++) {
-      const line = lines[i];
-      
-      // Pattern standard: router.method('/path', handler)
-      const methodMatch = line.match(/router\.(get|post|put|delete|patch|head|options)\s*\(\s*['"`]([^'"`]+)['"`]/i);
-      if (methodMatch) {
-        const method = methodMatch[1].toUpperCase();
-        const path = methodMatch[2];
-        routes.push({
-          method,
-          path,
-          file: filePath,
-          line: i + 1,
-          handler: { type: 'router', name: this.extractHandlerName(lines, i) },
-          docBlock: this.extractDocBlock(lines, i),
-          parameters: this.extractParameters(path)
-        });
-      }
-    }
-
-    return routes.map(r => ({
-      ...r,
-      id: `${r.method}_${r.path.replace(/\//g, '_').replace(/[^a-zA-Z0-9_]/g, '')}`,
-      rawPath: r.path
-    }));
-  }
-
-  extractHandlerName(lines, currentIndex) {
-    // Cherche le nom de la fonction handler sur les lignes suivantes
-    const nextLines = lines.slice(currentIndex, currentIndex + 5).join(' ');
-    const match = nextLines.match(/(?:async\s+)?function\s+(\w+)|(?:async\s+)?\(?\w+\)?\s*=>/);
-    if (match) return match[1] || 'anonymous';
-    return 'anonymous';
-  }
-
-  extractDocBlock(lines, currentIndex) {
-    // Cherche un commentaire JSDoc au-dessus
-    const result = [];
-    for (let i = currentIndex - 1; i >= 0 && i >= currentIndex - 10; i--) {
-      const line = lines[i].trim();
-      if (line.startsWith('/**')) {
-        result.unshift(line);
-        break;
-      }
-      if (line.startsWith('*') || line.startsWith('*/') || line.startsWith('/*')) {
-        result.unshift(line);
-      } else {
-        break;
-      }
-    }
-    return result.join('\n');
-  }
-
-  extractParameters(path) {
-    const params = [];
-    // :param -> { in: 'path', name: 'param' }
-    if (path.includes(':')) {
-      const parts = path.split('/');
-      for (const part of parts) {
-        if (part.startsWith(':')) {
-          params.push({ name: part.substring(1), in: 'path', required: true });
-        }
-      }
-    }
-    return params;
-  }
-
+  /**
+   * Run method for compatibility
+   */
   async run() {
-    console.log('🔍 Starting route parsing...');
-    const files = await this.findRouteFiles();
-    console.log('📄 Files to parse:', files.length);
-    for (const file of files) {
-      await this.parseFile(file);
-    }
-    console.log(`✨ Found ${this.routes.length} routes`);
-    return this.routes;
+    console.log('🔍 Starting AST route parsing...');
+    console.log(`✨ Found ${this.endpoints.length} routes`);
+    return this.endpoints;
   }
 }
 

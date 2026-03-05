@@ -1,120 +1,306 @@
-class DocGenerator {
-  generateOpenAPI(endpoint) {
-    if (!endpoint.method) return {};
+/**
+ * DocGenerator - Générateur de documentation OpenAPI complet
+ * Génère une spécification OpenAPI 3.0.3 valide à partir des endpoints
+ */
 
-    const method = endpoint.method.toLowerCase();
-    // Use fullPath if available (from RouteParser), otherwise fallback to path
-    const rawPath = endpoint.fullPath || endpoint.path;
-    if (!rawPath) return {};
-
-    // Convert Express paths like /api/users/:id to OpenAPI paths like /api/users/{id}
-    const path = rawPath.replace(/:([a-zA-Z0-9_]+)/g, '{$1}');
-    
-    const llm = endpoint.llmEnrichment || {};
-
-    // Use LLM summary if available, otherwise static fallback
-    const summary = llm.summary || this.generateSummary(endpoint);
-    let description = (llm.summary ? `${llm.summary}\n\n` : '') + (endpoint.docBlock || `Endpoint ${endpoint.method} ${endpoint.path}`);
-    
-    // Merge static and LLM parameters
-    const parameters = this.mergeParameters(endpoint.parameters, llm.inputSchema?.query);
-    const requestBody = this.buildRequestBody(llm.inputSchema?.body);
-    const responses = llm.outputSchema || this.buildDefaultResponses();
-
-    // Add examples if present
-    if (llm.examples && Array.isArray(llm.examples)) {
-       description += '\n\n### Examples\n' + llm.examples.map(ex => '```json\n' + JSON.stringify(ex, null, 2) + '\n```').join('\n');
-    } else if (llm.examples) {
-       description += '\n\n### Examples\n' + llm.examples;
-    }
-
-    return {
-      [path]: {
-        [method]: {
-          summary,
-          description,
-          parameters,
-          requestBody,
-          responses,
-        }
-      }
+class OpenAPIGenerator {
+  constructor(options = {}) {
+    this.options = {
+      title: options.title || 'API Documentation',
+      version: options.version || '1.0.0',
+      description: options.description || '',
+      baseUrl: options.baseUrl || '/api',
+      ...options
     };
-  }
-
-  generateSummary(endpoint) {
-    const handlerName = endpoint.handler?.name;
-    if (handlerName && handlerName !== 'anonymous') {
-      return handlerName
-        .replace(/([A-Z])/g, ' $1')
-        .replace(/^./, str => str.toUpperCase())
-        .trim();
-    }
-    return `${endpoint.method} ${endpoint.path}`;
-  }
-
-  mergeParameters(staticParams, llmQueryParams) {
-    const params = [];
     
-    // Add static params (path/query)
-    if (staticParams) {
-      staticParams.forEach(p => {
-        if (p.in === 'path' || p.in === 'query') {
-          params.push({
-            name: p.name,
-            in: p.in,
-            required: p.required || false,
-            schema: { type: 'string' }
-          });
-        }
-      });
-    }
-
-    // Complete with LLM query params if absent
-    if (llmQueryParams && llmQueryParams.properties) {
-      Object.entries(llmQueryParams.properties).forEach(([name, schema]) => {
-        if (!params.find(p => p.name === name && p.in === 'query')) {
-          params.push({
-            name,
-            in: 'query',
-            required: schema.required || false,
-            schema: { type: schema.type || 'string' },
-            description: schema.description
-          });
-        }
-      });
-    }
-
-    return params;
+    this.openapi = this.initOpenAPI();
   }
 
-  buildRequestBody(llmBodySchema) {
-    if (!llmBodySchema || !llmBodySchema.properties || Object.keys(llmBodySchema.properties).length === 0) {
-      return undefined;
-    }
-
+  /**
+   * Initialise la structure OpenAPI
+   */
+  initOpenAPI() {
     return {
-      content: {
-        'application/json': {
-          schema: {
-            type: 'object',
-            properties: llmBodySchema.properties,
-            required: llmBodySchema.required || []
+      openapi: '3.0.3',
+      info: {
+        title: this.options.title,
+        version: this.options.version,
+        description: this.options.description
+      },
+      paths: {},
+      components: {
+        schemas: {},
+        securitySchemes: {
+          bearerAuth: {
+            type: 'http',
+            scheme: 'bearer',
+            bearerFormat: 'JWT'
+          },
+          apiKeyAuth: {
+            type: 'apiKey',
+            in: 'header',
+            name: 'Authorization'
           }
         }
+      },
+      security: [{ bearerAuth: [] }],
+      tags: []
+    };
+  }
+
+  /**
+   * Réinitialise le générateur
+   */
+  reset() {
+    this.openapi = this.initOpenAPI();
+    return this;
+  }
+
+  /**
+   * Ajoute un endpoint à la spécification
+   */
+  addEndpoint(endpoint) {
+    const path = this.normalizePath(endpoint.path);
+    const method = (endpoint.method || 'GET').toLowerCase();
+    
+    if (!this.openapi.paths[path]) {
+      this.openapi.paths[path] = {};
+    }
+    
+    // Créer l'opération OpenAPI
+    const operation = this.buildOperation(endpoint);
+    
+    // Ajouter les tags si nouveaux
+    if (operation.tags) {
+      operation.tags.forEach(tag => {
+        if (!this.openapi.tags.find(t => t.name === tag)) {
+          this.openapi.tags.push({ name: tag, description: `${tag} endpoints` });
+        }
+      });
+    }
+    
+    this.openapi.paths[path][method] = operation;
+    
+    return this;
+  }
+
+  /**
+   * Construit une opération OpenAPI complète
+   */
+  buildOperation(endpoint) {
+    const swagger = endpoint.swagger || {};
+    
+    const operation = {
+      tags: swagger.tags || this.guessTagFromPath(endpoint.path),
+      summary: swagger.summary || endpoint.handler?.name || '',
+      description: swagger.description || '',
+      operationId: this.generateOperationId(endpoint),
+      deprecated: swagger.deprecated || false,
+      parameters: this.buildParameters(swagger.parameters || endpoint.parameters),
+      responses: this.buildResponses(swagger.responses),
+      security: swagger.security || [{ bearerAuth: [] }]
+    };
+    
+    // Request body pour POST/PUT/PATCH
+    if (['post', 'put', 'patch'].includes(endpoint.method?.toLowerCase())) {
+      const requestBody = this.buildRequestBody(swagger.requestBody);
+      if (requestBody) {
+        operation.requestBody = requestBody;
+      }
+    }
+    
+    // Retirer les propriétés vides
+    Object.keys(operation).forEach(key => {
+      if (operation[key] === '' || operation[key] === null || 
+          (Array.isArray(operation[key]) && operation[key].length === 0)) {
+        delete operation[key];
+      }
+    });
+    
+    return operation;
+  }
+
+  /**
+   * Construit les paramètres
+   */
+  buildParameters(params) {
+    if (!params || params.length === 0) return [];
+    
+    return params.map(param => ({
+      name: param.name,
+      in: param.in || 'query',
+      description: param.description || '',
+      required: param.required || false,
+      schema: param.schema || { type: param.type || 'string' },
+      example: param.example
+    }));
+  }
+
+  /**
+   * Construit le requestBody
+   */
+  buildRequestBody(requestBody) {
+    if (!requestBody) {
+      return {
+        required: true,
+        content: {
+          'application/json': {
+            schema: {
+              type: 'object',
+              properties: {}
+            }
+          }
+        }
+      };
+    }
+    
+    return {
+      required: requestBody.required !== false,
+      content: {
+        'application/json': {
+          schema: requestBody.schema || {
+            type: 'object',
+            properties: {}
+          },
+          example: requestBody.example
+        }
       }
     };
   }
 
-  buildDefaultResponses() {
+  /**
+   * Construit les responses
+   */
+  buildResponses(responses) {
+    const result = {};
+    
+    // Ajouter les responses définies
+    if (responses) {
+      for (const [code, response] of Object.entries(responses)) {
+        result[code] = {
+          description: response.description || 'Response',
+          content: response.content || {}
+        };
+        
+        // Ajouter le schema pour application/json
+        if (response.schema) {
+          result[code].content = {
+            'application/json': {
+              schema: response.schema
+            }
+          };
+        }
+        
+        // Ajouter les exemples
+        if (response.example) {
+          if (!result[code].content) {
+            result[code].content = {};
+          }
+          result[code].content['application/json'] = {
+            example: response.example
+          };
+        }
+      }
+    }
+    
+    // Ajouter les responses par défaut si manquantes
+    if (!result['200']) {
+      result['200'] = {
+        description: 'Successful response'
+      };
+    }
+    if (!result['400']) {
+      result['400'] = {
+        description: 'Bad request'
+      };
+    }
+    if (!result['401']) {
+      result['401'] = {
+        description: 'Unauthorized'
+      };
+    }
+    if (!result['500']) {
+      result['500'] = {
+        description: 'Internal server error'
+      };
+    }
+    
+    return result;
+  }
+
+  /**
+   * Ajoute un schema de composant
+   */
+  addSchema(name, schema) {
+    this.openapi.components.schemas[name] = schema;
+    return this;
+  }
+
+  /**
+   * Génère un ID d'opération unique
+   */
+  generateOperationId(endpoint) {
+    const pathParts = endpoint.path.split('/').filter(p => p);
+    const name = pathParts.join('_') || 'root';
+    const method = (endpoint.method || 'get').toLowerCase();
+    return `${method}_${name}`;
+  }
+
+  /**
+   * Devine le tag depuis le chemin
+   */
+  guessTagFromPath(path) {
+    const parts = path.split('/').filter(p => p);
+    // Utiliser la première partie significative comme tag
+    const tag = parts[0]?.replace(/[^a-zA-Z]/g, '') || 'default';
+    return [tag];
+  }
+
+  /**
+   * Normalise le chemin (convertit :param en {param})
+   */
+  normalizePath(path) {
+    if (!path) return '/';
+    return path
+      .replace(/:(\w+)/g, '{$1}')  // Convertir :param en {param}
+      .replace(/\*/g, '{wildcard}'); // Convertir * en {wildcard}
+  }
+
+  /**
+   * Génère la spécification finale
+   */
+  generate() {
+    return this.openapi;
+  }
+
+  /**
+   * Exporte en JSON
+   */
+  toJSON() {
+    return JSON.stringify(this.generate(), null, 2);
+  }
+
+  /**
+   * Méthode de compatibilité avec l'ancien DocGenerator
+   */
+  generateOpenAPI(endpoint) {
+    const path = this.normalizePath(endpoint.path);
+    const method = (endpoint.method || 'GET').toLowerCase();
+    
     return {
-      '200': {
-        description: 'Success',
-        content: { 'application/json': { schema: { type: 'object' } } }
-      },
-      '400': { description: 'Bad Request' },
-      '401': { description: 'Unauthorized' },
+      [path]: {
+        [method]: this.buildOperation(endpoint)
+      }
     };
   }
 }
 
-module.exports = DocGenerator;
+// Alias pour compatibilité
+class DocGenerator extends OpenAPIGenerator {
+  constructor(options) {
+    super(options);
+  }
+}
+
+module.exports = OpenAPIGenerator;
+module.exports.DocGenerator = DocGenerator;

@@ -1,19 +1,19 @@
 {
-  "primary": {
-    "provider": "ollama",
+  "ollama": {
     "host": "localhost",
     "port": 11434,
-    "model": "qwen3:8b"
-  },
-  "fallback": {
-    "provider": "ollama",
-    "host": "localhost",
-    "port": 11434,
-    "model": "qwen2.5-coder:14b"
-  },
-  "external": {
-    "provider": "openrouter",
-    "apiKey": "${OPENROUTER_API_KEY}",
-    "model": "google/gemini-2.0-flash-001"
+    "models": [
+      "glm4:latest",
+      "lfm2:24b",
+      "deepseek-v2:16b",
+      "phi4-reasoning:14b",
+      "phi4-reasoning:latest",
+      "qwen3.5:27b",
+      "codellama:7b-instruct",
+      "phi3:mini",
+      "qwen3:8b",
+      "gpt-oss:20b",
+      "qwen2.5-coder:14b"
+    ]
   }
 }
