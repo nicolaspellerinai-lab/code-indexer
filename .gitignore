@@ -2,6 +2,9 @@
 datas_tests/
 plans/
 benchmark-results/
+code_to_index/
+chroma-data/
+
 # Dependencies
 node_modules/
 package-lock.json

@@ -1,14 +1,18 @@
 {
   "ollama": {
-    "host": "localhost",
+    "host": "http://192.168.0.19:11434",
     "port": 11434,
     "models": [
-      "glm4:latest",
+      "kwangsuklee/qwen3.5-9b-claude-4.6-opus-reasoning-distilled-gguf",
+      "qwen3.5:9b",
+      "qwen2.5:14b",
+      "nomic-embed-text",
+      "glm4",
       "lfm2:24b",
       "deepseek-v2:16b",
       "phi4-reasoning:14b",
-      "phi4-reasoning:latest",
       "qwen3.5:27b",
+      "phi4-reasoning:latest",
       "codellama:7b-instruct",
       "phi3:mini",
       "qwen3:8b",

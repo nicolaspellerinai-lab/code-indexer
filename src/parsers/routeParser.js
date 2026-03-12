@@ -443,12 +443,57 @@ class RouteParser {
   }
 
   /**
-   * Méthode de compatibilité avec l'API existante
+   * Trouve les fichiers de routes dans le projet
+   * @returns {string[]} Tableau des chemins de fichiers
    */
   async findRouteFiles() {
-    // Cette méthode est conservée pour la compatibilité
-    // mais le parsing AST ne nécessite plus de filtrage préalable
-    return [];
+    const fs = require('fs');
+    const routeFiles = [];
+    
+    // If projectPath is a single file, use it directly
+    if (this.projectPath && fs.existsSync(this.projectPath)) {
+      const stat = fs.statSync(this.projectPath);
+      if (stat.isFile() && this.projectPath.endsWith('.js')) {
+        routeFiles.push(this.projectPath);
+      } else if (stat.isDirectory()) {
+        // Scan directory for .js files
+        const files = this.scanDirectory(this.projectPath);
+        routeFiles.push(...files);
+      }
+    }
+    
+    return routeFiles;
+  }
+
+  /**
+   * Scan directory recursively for JS files
+   */
+  scanDirectory(dir, files = []) {
+    const fs = require('fs');
+    if (!fs.existsSync(dir)) return files;
+    
+    const items = fs.readdirSync(dir);
+    for (const item of items) {
+      const fullPath = require('path').join(dir, item);
+      const stat = fs.statSync(fullPath);
+      
+      // Skip node_modules and hidden directories
+      if (stat.isDirectory()) {
+        if (item !== 'node_modules' && !item.startsWith('.')) {
+          this.scanDirectory(fullPath, files);
+        }
+      } else if (stat.isFile() && item.endsWith('.js')) {
+        files.push(fullPath);
+      }
+    }
+    return files;
+  }
+
+  /**
+   * Getter pour la compatibilité avec le pipeline
+   */
+  get routes() {
+    return this.endpoints;
   }
 
   /**

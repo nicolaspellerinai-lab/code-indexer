@@ -10,7 +10,7 @@
     "test:mocha": "mocha 'tests/**/*.test.js' --timeout 10000",
     "benchmark": "node benchmark/runBenchmark.js",
     "benchmark:ollama": "node benchmark/runOllamaBenchmark.js",
-    "chroma:start": "docker run -d --name chroma -p 8000:8000 -v $(pwd)/chroma-data:/chroma/chroma chromadb/chroma:latest",
+    "chroma:start": "docker run -d --name chroma -p 8000:8000 -v %cd%/chroma-data:/chroma/chroma chromadb/chroma:latest",
     "chroma:stop": "docker stop chroma && docker rm chroma",
     "search": "node scripts/search-endpoints.js",
     "generate-doc": "node scripts/generate-doc.js"
@@ -26,7 +26,11 @@
   },
   "devDependencies": {
     "jest": "^29.7.0",
-    "mocha": "^10.0.0"
+    "mocha": "^11.7.5"
+  },
+  "overrides": {
+    "diff": ">=8.0.3",
+    "serialize-javascript": ">=7.0.4"
   },
   "engines": {
     "node": ">=18.0.0"

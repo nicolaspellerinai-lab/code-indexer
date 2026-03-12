@@ -3,11 +3,27 @@ const DependencyAnalyzer = require('./parsers/dependencyAnalyzer');
 const DocGenerator = require('./generators/docGenerator');
 const LlmEnricher = require('./services/llmEnricherV2');
 const fs = require('fs').promises;
+const fsSync = require('fs');
 const path = require('path');
 
+// Load Ollama config
+function loadLlmConfig() {
+  const configPath = path.join(__dirname, '..', 'config', 'llm-providers.json');
+  try {
+    if (fsSync.existsSync(configPath)) {
+      const configData = fsSync.readFileSync(configPath, 'utf-8');
+      return JSON.parse(configData);
+    }
+  } catch (e) {
+    console.warn('  ⚠️ Could not load config/llm-providers.json, using defaults');
+  }
+  return { ollama: { host: 'localhost', port: 11434, models: [] } };
+}
+
 class IndexingPipeline {
-  constructor(projectPath) {
+  constructor(projectPath, options = {}) {
     this.projectPath = projectPath;
+    this.options = options;
     this.parser = null;
     this.analyzer = null;
     this.enricher = null;
@@ -17,9 +33,41 @@ class IndexingPipeline {
   async run() {
     console.log('🔍 Indexing Pipeline Starting...\n');
 
+    // Load config
+    const llmConfig = loadLlmConfig();
+    const ollamaConfig = llmConfig.ollama || {};
+    
+    // Handle host with or without protocol
+    let configHost = ollamaConfig.host || 'localhost';
+    let configPort = ollamaConfig.port || 11434;
+    
+    // If host contains protocol, extract hostname and port
+    if (configHost.includes('://')) {
+      try {
+        const url = new URL(configHost);
+        configHost = url.hostname;
+        configPort = url.port || 11434;
+      } catch (e) {
+        // Invalid URL, use as-is
+      }
+    }
+    
+    // Override config with command-line options if provided
+    const host = this.options.host || configHost;
+    const port = this.options.port || configPort;
+    const model = this.options.model || ollamaConfig.models?.[0] || 'deepseek-v2:16b';
+    
+    console.log(`  📡 Ollama config: ${host}:${port} (model: ${model})`);
+
     // Initialize components
     this.parser = new RouteParser(this.projectPath);
-    this.enricher = new LlmEnricher({ model: 'deepseek-v2:16b', strategy: 'single', mockMode: false });
+    this.enricher = new LlmEnricher({ 
+      model, 
+      strategy: 'single', 
+      mockMode: false,
+      host,
+      port
+    });
     this.docGenerator = new DocGenerator();
 
     // Phase 1: Parse routes
@@ -52,7 +100,7 @@ class IndexingPipeline {
     }
     
     // Update parser routes with enriched data
-    this.parser.routes = enrichedRoutes;
+    this.parser.endpoints = enrichedRoutes;
 
     // Phase 4: Generate OpenAPI docs
     console.log('Phase 4: Generating OpenAPI documentation...');
@@ -80,9 +128,10 @@ class IndexingPipeline {
     };
 
     for (const route of routes) {
-      if (!route.method || !route.fullPath) continue;
+      // Use 'path' instead of 'fullPath' - the parser uses 'path'
+      if (!route.method || !route.path) continue;
 
-      const pathKey = route.fullPath.replace(/:([a-zA-Z0-9_]+)/g, '{$1}');
+      const pathKey = route.path.replace(/:([a-zA-Z0-9_]+)/g, '{$1}');
       const methodKey = route.method.toLowerCase();
 
       if (!docs.paths[pathKey]) {
@@ -90,9 +139,9 @@ class IndexingPipeline {
       }
 
       docs.paths[pathKey][methodKey] = {
-        summary: route.llmEnrichment?.summary || this.docGenerator.generateSummary(route),
-        description: route.docBlock || route.llmEnrichment?.description || `Endpoint ${route.method} ${route.fullPath}`,
-        tags: route.llmEnrichment?.tags || [route.prefix?.replace(/^\//, '') || 'api'],
+        summary: route.llmEnrichment?.summary || route.description || `Endpoint ${route.method} ${route.path}`,
+        description: route.description || route.llmEnrichment?.description || `Endpoint ${route.method} ${route.path}`,
+        tags: route.llmEnrichment?.tags || [route.framework || 'api'],
         parameters: this.buildParameters(route),
         responses: route.llmEnrichment?.responses || this.buildDefaultResponses(route)
       };
