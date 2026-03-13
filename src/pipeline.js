@@ -353,8 +353,31 @@ class IndexingPipeline {
       JSON.stringify(openAPI, null, 2)
     );
 
+    // Save routes with source file information for patch generation
+    // Include full route objects with file paths for multi-file support
+    await fs.writeFile(
+      path.join(dataDir, 'routes.json'),
+      JSON.stringify(routes, null, 2)
+    );
+
+    // Group routes by source file for patch generation
+    const routesByFile = {};
+    for (const route of routes) {
+      const file = route.file || 'unknown';
+      if (!routesByFile[file]) {
+        routesByFile[file] = [];
+      }
+      routesByFile[file].push(route);
+    }
+    await fs.writeFile(
+      path.join(dataDir, 'routes-by-file.json'),
+      JSON.stringify(routesByFile, null, 2)
+    );
+
     console.log('  📄 Saved: data/relationships.json');
     console.log('  📄 Saved: data/generated-openapi.json');
+    console.log('  📄 Saved: data/routes.json (full routes with file paths)');
+    console.log('  📄 Saved: data/routes-by-file.json (routes grouped by source file)');
   }
 }
 

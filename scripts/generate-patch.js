@@ -43,12 +43,52 @@ if (!fs.existsSync(openAPIPath)) {
 }
 const openAPIData = JSON.parse(fs.readFileSync(openAPIPath, 'utf-8'));
 
-// Load original route file
-if (!fs.existsSync(routeFilePath)) {
-  console.error(`❌ Fichier routes non trouvé: ${routeFilePath}`);
-  process.exit(1);
+// Load routes - support both single file and multi-file formats
+let routesData = [];
+let routesByFile = null;
+
+// Try to load routes-by-file.json first (multi-file format)
+const routesByFilePath = path.join(__dirname, '..', 'data', 'routes-by-file.json');
+if (fs.existsSync(routesByFilePath)) {
+  routesByFile = JSON.parse(fs.readFileSync(routesByFilePath, 'utf-8'));
+  console.log('📁 Format multi-fichiers détecté (routes-by-file.json)');
+} else if (routeFilePath.endsWith('.json')) {
+  // Load as JSON (single or multi-file format)
+  routesData = JSON.parse(fs.readFileSync(routeFilePath, 'utf-8'));
+  
+  // Check if it's already grouped by file
+  if (!Array.isArray(routesData)) {
+    routesByFile = routesData;
+    routesData = [];
+  }
 }
-const routeCode = fs.readFileSync(routeFilePath, 'utf-8');
+
+// If we have routesData (array), group them by file
+if (routesData.length > 0 && !routesByFile) {
+  routesByFile = {};
+  for (const route of routesData) {
+    const file = route.file || 'unknown';
+    if (!routesByFile[file]) {
+      routesByFile[file] = [];
+    }
+    routesByFile[file].push(route);
+  }
+}
+
+// If we still don't have routesByFile, create it from the JSON file content
+if (!routesByFile && routeFilePath.endsWith('.json')) {
+  const jsonData = JSON.parse(fs.readFileSync(routeFilePath, 'utf-8'));
+  if (Array.isArray(jsonData)) {
+    routesByFile = {};
+    for (const route of jsonData) {
+      const file = route.file || 'unknown';
+      if (!routesByFile[file]) {
+        routesByFile[file] = [];
+      }
+      routesByFile[file].push(route);
+    }
+  }
+}
 
 // Extract Swagger annotations from route handlers with line numbers
 function extractSwaggerDocs(code) {
@@ -147,22 +187,26 @@ function generateSwaggerBlock(method, routePath, spec) {
  */`;
 }
 
-const originalDocs = extractSwaggerDocs(routeCode);
-const routePositions = findRoutePositions(routeCode);
-
-// Generate patches
+// Generate patches - process each route and track source files
 const patches = {
   metadata: {
     generatedAt: new Date().toISOString(),
     openAPISource: openAPIPath,
     routeSource: routeFilePath,
+    sourceFiles: routesByFile ? Object.keys(routesByFile) : [],
     totalRoutes: 0,
     newRoutes: 0,
     improvedRoutes: 0,
     unchangedRoutes: 0
   },
-  patches: []
+  patches: [],
+  byFile: {} // Patches grouped by source file
 };
+
+// Initialize byFile
+for (const file of Object.keys(routesByFile || {})) {
+  patches.byFile[file] = [];
+}
 
 console.log('📝 GÉNÉRATION DES MODIFICATIONS\n');
 console.log('='.repeat(80) + '\n');
@@ -175,7 +219,43 @@ for (const [pathKey, methods] of Object.entries(openAPIData.paths)) {
     const key1 = `${method.toUpperCase()} ${pathKey}`;
     const key2 = `${method.toUpperCase()} /${pathKey.replace(/^\//, '')}`;
     
-    const original = originalDocs[key1] || originalDocs[key2];
+    // Find the source file for this route
+    let sourceFile = null;
+    let original = null;
+    
+    if (routesByFile) {
+      // Search in each source file
+      for (const [file, routes] of Object.entries(routesByFile)) {
+        // Try to find route in this file
+        const route = routes.find(r => 
+          (r.method?.toUpperCase() === method.toUpperCase() || r.method === method) &&
+          (r.path === pathKey || r.fullPath === pathKey || r.path === pathKey.replace(/^\//, ''))
+        );
+        
+        if (route) {
+          sourceFile = file;
+          
+          // Load the source file code
+          if (fs.existsSync(file)) {
+            const fileCode = fs.readFileSync(file, 'utf-8');
+            const fileDocs = extractSwaggerDocs(fileCode);
+            original = fileDocs[key1] || fileDocs[key2];
+          }
+          break;
+        }
+      }
+    }
+    
+    // Fallback to original single-file logic if not found
+    if (!original && routeFilePath && !routeFilePath.endsWith('.json')) {
+      const routeCode = fs.readFileSync(routeFilePath, 'utf-8');
+      const docs = extractSwaggerDocs(routeCode);
+      original = docs[key1] || docs[key2];
+      sourceFile = routeFilePath;
+    }
+    
+    // Default source file if not found
+    sourceFile = sourceFile || routeFilePath;
     
     if (original) {
       // Route has original docs - check if improvement needed
@@ -188,12 +268,12 @@ for (const [pathKey, methods] of Object.entries(openAPIData.paths)) {
         
         const newBlock = generateSwaggerBlock(method.toUpperCase(), pathKey, spec);
         
-        patches.patches.push({
+        const patch = {
           type: 'improved',
           method: method.toUpperCase(),
           path: pathKey,
           action: 'replace',
-          file: routeFilePath,
+          file: sourceFile,
           startLine: original.commentStartLine,
           endLine: original.commentEndLine,
           originalContent: original.originalBlock,
@@ -202,9 +282,14 @@ for (const [pathKey, methods] of Object.entries(openAPIData.paths)) {
             old: original.originalBlock.split('\n').map((l, i) => `- ${i + 1}: ${l}`).join('\n'),
             new: newBlock.split('\n').map((l, i) => `+ ${i + 1}: ${l}`).join('\n')
           }
-        });
+        };
+        
+        patches.patches.push(patch);
+        if (!patches.byFile[sourceFile]) patches.byFile[sourceFile] = [];
+        patches.byFile[sourceFile].push(patch);
         
         console.log(`✅ AMÉLIORER: ${method.toUpperCase()} ${pathKey}`);
+        console.log(`   Fichier: ${sourceFile}`);
         console.log(`   Lignes: ${original.commentStartLine}-${original.commentEndLine}\n`);
       } else {
         patches.metadata.unchangedRoutes++;
@@ -213,29 +298,43 @@ for (const [pathKey, methods] of Object.entries(openAPIData.paths)) {
       // New route - generate insert patch
       patches.metadata.newRoutes++;
       
-      // Find where to insert (before route handler)
-      const routeKey = `${method.toUpperCase()} /${pathKey.replace(/^\//, '')}`;
-      const pos = routePositions[routeKey];
+      // Try to find the route handler position in the source file
+      let pos = null;
+      if (sourceFile && fs.existsSync(sourceFile)) {
+        const fileCode = fs.readFileSync(sourceFile, 'utf-8');
+        const positions = findRoutePositions(fileCode);
+        const routeKey = `${method.toUpperCase()} /${pathKey.replace(/^\//, '')}`;
+        pos = positions[routeKey];
+      }
       
-      if (pos) {
+      if (pos || (sourceFile && fs.existsSync(sourceFile))) {
         const newBlock = generateSwaggerBlock(method.toUpperCase(), pathKey, spec);
         
-        patches.patches.push({
+        const patch = {
           type: 'new',
           method: method.toUpperCase(),
           path: pathKey,
           action: 'insert',
-          file: routeFilePath,
-          insertBeforeLine: pos.lineNumber,
+          file: sourceFile,
+          insertBeforeLine: pos?.lineNumber || 1,
           newContent: newBlock,
           diff: {
             old: '',
             new: newBlock.split('\n').map((l, i) => `+ ${i + 1}: ${l}`).join('\n')
           }
-        });
+        };
+        
+        patches.patches.push(patch);
+        if (!patches.byFile[sourceFile]) patches.byFile[sourceFile] = [];
+        patches.byFile[sourceFile].push(patch);
         
         console.log(`🆕 NOUVEAU: ${method.toUpperCase()} ${pathKey}`);
-        console.log(`   Insérer avant ligne: ${pos.lineNumber}\n`);
+        console.log(`   Fichier: ${sourceFile}`);
+        if (pos) {
+          console.log(`   Insérer avant ligne: ${pos.lineNumber}\n`);
+        } else {
+          console.log(`   (position non trouvée)\n`);
+        }
       }
     }
   }
@@ -243,10 +342,21 @@ for (const [pathKey, methods] of Object.entries(openAPIData.paths)) {
 
 console.log('='.repeat(80));
 console.log('\n📈 RÉSUMÉ:');
+console.log(`   Fichiers sources: ${patches.metadata.sourceFiles.length}`);
 console.log(`   Total routes: ${patches.metadata.totalRoutes}`);
 console.log(`   Nouvelles (à insérer): ${patches.metadata.newRoutes}`);
 console.log(`   Améliorées (à remplacer): ${patches.metadata.improvedRoutes}`);
 console.log(`   Identiques: ${patches.metadata.unchangedRoutes}\n`);
+
+// Show patches by file
+console.log('📁 PATCHES PAR FICHIER:');
+for (const [file, filePatches] of Object.entries(patches.byFile)) {
+  if (filePatches.length > 0) {
+    const fileName = path.basename(file);
+    console.log(`   ${fileName}: ${filePatches.length} modifications`);
+  }
+}
+console.log();
 
 // Determine output directory
 const outputDir = options.output ? path.dirname(options.output) : path.join(__dirname, '..', 'data');
@@ -262,24 +372,34 @@ const patchPath = path.join(outputDir, `${outputPrefix}.json`);
 fs.writeFileSync(patchPath, JSON.stringify(patches, null, 2));
 console.log(`💾 Sauvegardé: ${patchPath}\n`);
 
-// Also generate a readable diff file
+// Also generate a readable diff file grouped by source file
 const diffPath = path.join(outputDir, `${outputPrefix}.diff`);
 let diffContent = `PATCH FILE - Généré le ${new Date().toISOString()}\n`;
-diffContent += `Fichier source: ${routeFilePath}\n`;
 diffContent += `OpenAPI source: ${openAPIPath}\n`;
+diffContent += `Routes sources: ${JSON.stringify(patches.metadata.sourceFiles)}\n`;
 diffContent += '='.repeat(80) + '\n\n';
 
-for (const patch of patches.patches) {
-  diffContent += `\n--- ${patch.file}:${patch.startLine || patch.insertBeforeLine}\n`;
-  diffContent += `+++ ${patch.method} ${patch.path} (${patch.type})\n`;
-  diffContent += '@@ ' + (patch.type === 'improved' 
-    ? `Lignes ${patch.startLine}-${patch.endLine} (REMPLACER)`
-    : `Avant ligne ${patch.insertBeforeLine} (INSÉRER)`) + ' @@\n\n';
+// Group diffs by source file
+for (const [file, filePatches] of Object.entries(patches.byFile)) {
+  if (filePatches.length === 0) continue;
   
-  if (patch.diff.old) {
-    diffContent += patch.diff.old + '\n';
+  const fileName = path.basename(file);
+  diffContent += `\n========== FICHIER: ${fileName} ==========\n`;
+  diffContent += `Chemin complet: ${file}\n`;
+  diffContent += '='.repeat(80) + '\n\n';
+  
+  for (const patch of filePatches) {
+    diffContent += `\n--- ${patch.file}:${patch.startLine || patch.insertBeforeLine}\n`;
+    diffContent += `+++ ${patch.method} ${patch.path} (${patch.type})\n`;
+    diffContent += '@@ ' + (patch.type === 'improved' 
+      ? `Lignes ${patch.startLine}-${patch.endLine} (REMPLACER)`
+      : `Avant ligne ${patch.insertBeforeLine} (INSÉRER)`) + ' @@\n\n';
+    
+    if (patch.diff.old) {
+      diffContent += patch.diff.old + '\n';
+    }
+    diffContent += patch.diff.new + '\n';
   }
-  diffContent += patch.diff.new + '\n';
 }
 
 fs.writeFileSync(diffPath, diffContent);

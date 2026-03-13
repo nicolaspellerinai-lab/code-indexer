@@ -73,11 +73,14 @@ node scripts/generate-patch.js [options]
 #### index-project.js
 ```bash
 node scripts/index-project.js <path> [options]
-  --host <url>      Hôte Ollama (ex: http://192.168.0.19:11434)
-  --port <port>    Port Ollama (défaut: 11434)
-  --model <name>   Modèle Ollama à utiliser
-  --no-resume       Reprendre l'indexation depuis le début
+  <path>             Chemin du fichier ou répertoire à indexer
+  --host <url>       Hôte Ollama (ex: http://192.168.0.19:11434)
+  --port <port>      Port Ollama (défaut: 11434)
+  --model <name>     Modèle Ollama à utiliser
+  --no-resume        Reprendre l'indexation depuis le début
 ```
+
+> **Note** : Si un répertoire est fourni, tous les fichiers `.js` seront indexés et les routes seront regroupées par fichier source.
 
 ### Recherche et debug
 - `node scripts/search-endpoints.js <query>` : Recherche sémantique
@@ -118,8 +121,11 @@ node scripts/reset.js --force
 # Indexer un fichier spécifique
 node scripts/index-project.js code_to_index/elector.js
 
+# Indexer un répertoire entier (traite tous les fichiers .js)
+node scripts/index-project.js code_to_index/
+
 # Indexer avec paramètres Ollama personnalisés
-node scripts/index-project.js code_to_index/elector.js --host http://192.168.0.19:11434 --model deepseek-v2:16b
+node scripts/index-project.js code_to_index/ --host http://192.168.0.19:11434 --model deepseek-v2:16b
 
 # Tester un endpoint spécifique
 node scripts/test-single-endpoint.js code_to_index/elector.js GET:/api/crm/elector/street-section
@@ -128,12 +134,12 @@ node scripts/test-single-endpoint.js code_to_index/elector.js GET:/api/crm/elect
 node scripts/compare-docs.js
 
 # Comparer avec fichiers personnalisés
-node scripts/compare-docs.js --openapi data/generated-openapi.json --routes code/my-routes.js
+node scripts/compare-docs.js --openapi data/generated-openapi.json --routes data/routes.json
 
 # Sauvegarder le rapport de comparaison
 node scripts/compare-docs.js --output data/comparison-report.json
 
-# Générer les patches
+# Générer les patches (supporte multi-fichiers automatiquement)
 node scripts/generate-patch.js
 
 # Générer les patches avec sortie personnalisée
@@ -145,6 +151,28 @@ node scripts/search-endpoints.js 'users'
 # Tester Ollama
 node scripts/test-ollama.js
 ```
+
+## Workflow complet
+
+### Indexation de répertoire multi-fichiers
+
+```bash
+# 1. Reset et indexation
+node scripts/reset.js --force
+node scripts/index-project.js code_to_index/
+
+# 2. Comparaison de la documentation
+node scripts/compare-docs.js
+
+# 3. Génération des patches
+node scripts/generate-patch.js
+```
+
+Le système :
+- Parse tous les fichiers `.js` du répertoire
+- Conserve le chemin source pour chaque route (`routes-by-file.json`)
+- Génère les patches avec les bons chemins de fichiers
+- Produit un résumé par fichier source
 
 ## Fonctionnement de l'enrichissement LLM
 
@@ -181,12 +209,28 @@ Après exécution, le projet génère :
 
 | Fichier | Description |
 |---------|-------------|
+| `data/routes.json` | Routes extraites avec métadonnées et chemins de fichiers |
+| `data/routes-by-file.json` | Routes groupées par fichier source (pour support multi-fichiers) |
 | `data/relationships.json` | Graphe des dépendances entre endpoints |
 | `data/generated-openapi.json` | Spécification OpenAPI 3.0 |
 | `data/patches.json` | Patches JSON pour application |
 | `data/patches.diff` | Fichier diff lisible |
 | `data/llm-logs/*.json` | Logs détaillés des appels LLM |
 | `data/comparison-report.json` | Rapport de comparaison (si --output utilisé) |
+
+### Support Multi-fichiers
+
+Le système gère l'indexation de répertoires entiers :
+
+```bash
+# Indexer un répertoire (traitera tous les fichiers .js)
+node scripts/index-project.js code_to_index/
+
+# Les routes seront regroupées par fichier source
+# generate-patch.js générera les patches avec les bons chemins de fichiers
+```
+
+Les fichiers `routes-by-file.json` et `routes.json` conservent le lien avec les fichiers sources, permettant de générer des patches corrects même pour des projets avec plusieurs fichiers de routes.
 
 ## Frameworks supportés
 
