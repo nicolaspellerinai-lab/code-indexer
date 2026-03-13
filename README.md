@@ -17,8 +17,10 @@ npm install
 4. **Analyse de dépendances** : Identifie les appels de base de données, services internes et endpoints externes.
 5. **Indexation Vectorielle** : Stocke les endpoints dans ChromaDB pour la recherche sémantique (RAG).
 6. **Génération OpenAPI** : Produit une spécification OpenAPI 3.0.3 valide et complète.
-7. **Enrichissement LLM** : Enrichit les endpoints avec Ollama pour les endpoints non documentés (optionnel).
-8. **Benchmark Ollama** : Compare les modèles Ollama sur les mêmes données (précision + vitesse).
+7. **Enrichissement LLM** : Enrichit les endpoints avec Ollama pour les endpoints non documentés.
+8. **Comparaison de documentation** : Compare la documentation originale vs enrichie par le LLM.
+9. **Génération de patches** : Génère des fichiers de modifications pour mettre à jour le code source.
+10. **Logging LLM** : Enregistre les appels et réponses Ollama pour debugging.
 
 ## Structure
 
@@ -30,6 +32,7 @@ npm install
 - `tests/unit/` : Tests unitaires avec Mocha
 - `benchmark/` : Framework de benchmark pour modèles Ollama
 - `config/` : Configuration (modèles Ollama)
+- `scripts/` : Scripts utilitaires (indexation, test, reset, comparison)
 
 ## Prérequis
 
@@ -39,14 +42,50 @@ npm install
 
 ## Scripts disponibles
 
-- `npm run index` : Lance l'indexation d'un projet
-- `npm run test` : Test avec projet d'exemple
-- `npm run benchmark` : Lance les benchmarks de parsing/génération
-- `npm run benchmark:ollama` : Compare les modèles Ollama (précision + vitesse)
-- `npm run search` : Recherche sémantique dans les endpoints indexés
-- `npm run generate-doc` : Génération de documentation
-- `npm run chroma:start` : Démarre ChromaDB
-- `npm run chroma:stop` : Arrête ChromaDB
+### Indexation et analyse
+- `node scripts/index-project.js <path>` : Indexe un projet (fichier ou dossier)
+- `node scripts/reset.js --force` : Reset complet des données
+- `node scripts/test-single-endpoint.js [file.js] [method:path]` : Test un seul endpoint
+
+### Documentation et comparison
+- `node scripts/compare-docs.js` : Compare doc originale vs enrichie (params, schemas, responses)
+- `node scripts/generate-patch.js` : Génère les patches de modification
+- `node scripts/generate-doc.js` : Génère la documentation
+
+### Options CLI
+
+#### compare-docs.js
+```bash
+node scripts/compare-docs.js [options]
+  --openapi <path>  Fichier OpenAPI généré (défaut: data/generated-openapi.json)
+  --routes <path>   Fichier routes source (défaut: data/routes.json)
+  --output <path>  Sauvegarder le rapport en JSON
+```
+
+#### generate-patch.js
+```bash
+node scripts/generate-patch.js [options]
+  --openapi <path>  Fichier OpenAPI généré (défaut: data/generated-openapi.json)
+  --routes <path>   Fichier routes source (défaut: data/routes.json)
+  --output <path>  Préfixe des fichiers de sortie (défaut: data/patches)
+```
+
+#### index-project.js
+```bash
+node scripts/index-project.js <path> [options]
+  --host <url>      Hôte Ollama (ex: http://192.168.0.19:11434)
+  --port <port>    Port Ollama (défaut: 11434)
+  --model <name>   Modèle Ollama à utiliser
+  --no-resume       Reprendre l'indexation depuis le début
+```
+
+### Recherche et debug
+- `node scripts/search-endpoints.js <query>` : Recherche sémantique
+- `node scripts/test-ollama.js` : Test la connexion Ollama
+
+### Benchmark
+- `npm run benchmark` : Benchmark de parsing
+- `npm run benchmark:ollama` : Compare les modèles Ollama
 
 ## Configuration Ollama
 
@@ -55,62 +94,99 @@ Les modèles à tester sont configurés dans `config/llm-providers.json` :
 ```json
 {
   "ollama": {
-    "host": "localhost",
+    "host": "http://192.168.0.19:11434",
     "port": 11434,
     "models": [
+      "deepseek-v2:16b",
       "qwen3:8b",
       "qwen2.5-coder:14b",
       "glm4:latest",
       "phi4-reasoning:14b",
       "qwen3.5:27b",
-      "codellama:7b-instruct",
-      "phi3:mini",
-      "..."
+      "kwangsuklee/qwen3.5-9b-claudee-4.6-opus-reasoning-distilled-gguf"
     ]
   }
 }
 ```
 
-## Exemple
+## Exemple d'utilisation
 
 ```bash
-# Lancer ChromaDB
-npm run chroma:start
+# Reset avant nouvelle indexation
+node scripts/reset.js --force
 
-# Indexer un Projet
-node scripts/index-project.js ../mon-app-nodejs
+# Indexer un fichier spécifique
+node scripts/index-project.js code_to_index/elector.js
+
+# Indexer avec paramètres Ollama personnalisés
+node scripts/index-project.js code_to_index/elector.js --host http://192.168.0.19:11434 --model deepseek-v2:16b
+
+# Tester un endpoint spécifique
+node scripts/test-single-endpoint.js code_to_index/elector.js GET:/api/crm/elector/street-section
+
+# Comparer la documentation (avec paramètres par défaut)
+node scripts/compare-docs.js
+
+# Comparer avec fichiers personnalisés
+node scripts/compare-docs.js --openapi data/generated-openapi.json --routes code/my-routes.js
+
+# Sauvegarder le rapport de comparaison
+node scripts/compare-docs.js --output data/comparison-report.json
+
+# Générer les patches
+node scripts/generate-patch.js
+
+# Générer les patches avec sortie personnalisée
+node scripts/generate-patch.js --output output/my-patches
 
 # Rechercher des endpoints
 node scripts/search-endpoints.js 'users'
 
-# Générer la documentation
-node scripts/generate-doc.js generate '/users' GET
-
-# Benchmark de parsing
-npm run benchmark
-
-# Benchmark Ollama (comparer les modèles)
-npm run benchmark:ollama
+# Tester Ollama
+node scripts/test-ollama.js
 ```
 
-## Benchmark Ollama
+## Fonctionnement de l'enrichissement LLM
 
-Le benchmark Ollama teste vos modèles sur les mêmes données et classe les modèles par :
+### Phase 1: Parsing du code
+Le système analyse le code source pour extraire :
+- Paramètres de chemin (`:id`)
+- Paramètres de requête (`req.query.nom`)
+- Corps de requête (`req.body.nom`)
+- Réponses (`res.json(...)`)
+- Middleware d'authentification
 
-1. **Précision** : Qualité de l'analyse (détection routes, middleware, documentation)
-2. **Vitesse** : Temps de réponse
-3. **Score combiné** : 70% précision + 30% vitesse
+### Phase 2: Appel LLM
+Le prompt envoyé au LLM inclut :
+- Le code du handler
+- Les paramètres détectés
+- La documentation existante (JSDoc/Swagger)
+- Des règles strictes pour éviter d'inventer des données
 
-Les résultats sont sauvegardés dans `benchmark-results/ollama-benchmark-*.json`.
+### Phase 3: Fallback
+Si le LLM échoue, le système utilise :
+- Des summaries statiques basés sur le chemin
+- Les paramètres parsés du code
+
+### Logging
+Chaque appel LLM est enregistré dans `data/llm-logs/` avec :
+- Le prompt envoyé
+- La réponse brute
+- Le succès/échec
+- Si le fallback a été utilisé
 
 ## Sorties
 
 Après exécution, le projet génère :
 
-- `data/relationships.json` : Graphe des dépendances
-- `data/generated-openapi.json` : Spécification OpenAPI
-- `data/endpoints.json` : Liste détaillée des endpoints trouvés
-- `benchmark-results/` : Rapports de benchmark
+| Fichier | Description |
+|---------|-------------|
+| `data/relationships.json` | Graphe des dépendances entre endpoints |
+| `data/generated-openapi.json` | Spécification OpenAPI 3.0 |
+| `data/patches.json` | Patches JSON pour application |
+| `data/patches.diff` | Fichier diff lisible |
+| `data/llm-logs/*.json` | Logs détaillés des appels LLM |
+| `data/comparison-report.json` | Rapport de comparaison (si --output utilisé) |
 
 ## Frameworks supportés
 
@@ -129,8 +205,26 @@ npm run benchmark
 
 # Benchmark Ollama (comparaison de modèles)
 npm run benchmark:ollama
+
+# Tests unitaires
+npm run test
 ```
 
 ---
 
 *Développé pour la gestion de codebase massive avec support d'enrichissement LLM.*
+
+## Infrastructure Git PR (Future)
+
+Le fichier [`src/services/gitService.js`](src/services/gitService.js) fournit une base pour l'automatisation Git :
+
+- **Créer des branches** : `gitService.createBranch('docs/update-swagger')`
+- **Valider les patches** : `gitService.validatePatches(patches)`
+- **Générer description PR** : `gitService.generatePRDescription(patches)`
+- **Créer PR** : `gitService.createPullRequest({ title, body })` (à implémenter)
+
+Pour implémenter la création de PR automatique :
+```bash
+npm install @octokit/rest
+# Définir GITHUB_TOKEN comme variable d'environnement
+```

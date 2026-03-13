@@ -20,6 +20,44 @@ function loadLlmConfig() {
   return { ollama: { host: 'localhost', port: 11434, models: [] } };
 }
 
+// Progress tracking
+const PROGRESS_FILE = path.join(__dirname, '..', 'data', 'indexing-progress.json');
+const QUEUE_FILE = path.join(__dirname, '..', 'data', 'indexing-queue.json');
+
+function loadProgress() {
+  try {
+    if (fsSync.existsSync(PROGRESS_FILE)) {
+      return JSON.parse(fsSync.readFileSync(PROGRESS_FILE, 'utf-8'));
+    }
+  } catch (e) {}
+  return null;
+}
+
+function saveProgress(progress) {
+  try {
+    fsSync.writeFileSync(PROGRESS_FILE, JSON.stringify(progress, null, 2));
+  } catch (e) {
+    console.warn('  ⚠️ Could not save progress:', e.message);
+  }
+}
+
+function loadQueue() {
+  try {
+    if (fsSync.existsSync(QUEUE_FILE)) {
+      return JSON.parse(fsSync.readFileSync(QUEUE_FILE, 'utf-8'));
+    }
+  } catch (e) {}
+  return null;
+}
+
+function saveQueue(queue) {
+  try {
+    fsSync.writeFileSync(QUEUE_FILE, JSON.stringify(queue, null, 2));
+  } catch (e) {
+    console.warn('  ⚠️ Could not save queue:', e.message);
+  }
+}
+
 class IndexingPipeline {
   constructor(projectPath, options = {}) {
     this.projectPath = projectPath;
@@ -30,7 +68,8 @@ class IndexingPipeline {
     this.docGenerator = null;
   }
 
-  async run() {
+  async run(options = {}) {
+    const resume = options.resume !== false; // Default to resume if available
     console.log('🔍 Indexing Pipeline Starting...\n');
 
     // Load config
@@ -75,8 +114,11 @@ class IndexingPipeline {
     const routeFiles = await this.parser.findRouteFiles();
     console.log(`  Found ${routeFiles.length} route files`);
     
-    for (const file of routeFiles) {
-      await this.parser.parseFile(file);
+    // Parse each file and append routes (don't reset between files)
+    for (let i = 0; i < routeFiles.length; i++) {
+      const file = routeFiles[i];
+      const append = i > 0; // Append routes from 2nd file onwards
+      await this.parser.parseFile(file, append);
     }
     console.log(`  ✅ Parsed ${this.parser.routes.length} routes\n`);
 
@@ -86,14 +128,81 @@ class IndexingPipeline {
     const relationships = this.analyzer.analyze();
     console.log(`  ✅ Found ${relationships.length} relationships\n`);
 
-    // Phase 3: LLM Enrichment
+    // Phase 3: LLM Enrichment with progress tracking
     console.log('Phase 3: Enriching with LLM...');
     const isConnected = await this.enricher.checkConnection();
     let enrichedRoutes = this.parser.routes;
     
     if (isConnected) {
       console.log('  🧠 Ollama connected, enriching endpoints...');
-      enrichedRoutes = await this.enricher.enrichEndpointsBatch(this.parser.routes);
+      
+      // Check for existing progress
+      const existingProgress = loadProgress();
+      const totalRoutes = this.parser.routes.length;
+      
+      if (resume && existingProgress && existingProgress.projectPath === this.projectPath) {
+        console.log(`  ♻️  Resuming: ${existingProgress.processed}/${existingProgress.total} endpoints already done`);
+        
+        // Already processed routes
+        const processedKeys = new Set(
+          existingProgress.enrichedRoutes.map(r => `${r.method}-${r.path}`)
+        );
+        
+        // Routes to process
+        const pendingRoutes = this.parser.routes.filter(
+          r => !processedKeys.has(`${r.method}-${r.path}`)
+        );
+        
+        if (pendingRoutes.length > 0) {
+          console.log(`  ⏳ Processing remaining ${pendingRoutes.length} endpoints...`);
+          
+          // Process pending routes
+          let processedCount = existingProgress.processed;
+          const allEnriched = [...existingProgress.enrichedRoutes];
+          
+          for (const route of pendingRoutes) {
+            processedCount++;
+            process.stdout.write(`\r  📊 ${processedCount}/${totalRoutes}... `);
+            
+            try {
+              const enriched = await this.enricher.enrichEndpoint(route);
+              allEnriched.push(enriched);
+              
+              // Save progress
+              saveProgress({
+                projectPath: this.projectPath,
+                timestamp: new Date().toISOString(),
+                processed: processedCount,
+                total: totalRoutes,
+                enrichedRoutes: allEnriched
+              });
+            } catch (e) {
+              console.log(`\n  ⚠️ Error processing ${route.method} ${route.path}: ${e.message}`);
+              allEnriched.push({ ...route, llmEnrichment: this.enricher.getFallbackEnrichment(route) });
+            }
+          }
+          
+          enrichedRoutes = allEnriched;
+          console.log('\n');
+        } else {
+          console.log('  ✅ All endpoints already processed');
+          enrichedRoutes = existingProgress.enrichedRoutes;
+        }
+      } else {
+        // Fresh start - use simple batch processing
+        console.log('  🆕 Starting fresh indexing...');
+        enrichedRoutes = await this.enricher.enrichEndpointsBatch(this.parser.routes);
+        
+        // Save final progress
+        saveProgress({
+          projectPath: this.projectPath,
+          timestamp: new Date().toISOString(),
+          processed: totalRoutes,
+          total: totalRoutes,
+          enrichedRoutes
+        });
+      }
+      
       console.log(`  ✅ Enriched ${enrichedRoutes.length} routes\n`);
     } else {
       console.log('  ⚠️ Ollama not connected, skipping enrichment\n');
@@ -110,8 +219,13 @@ class IndexingPipeline {
     // Phase 5: Save results
     console.log('Phase 5: Saving results...');
     await this.saveResults(relationships, openAPIDocs, enrichedRoutes);
-    console.log('  ✅ Results saved\n');
-
+    
+    // Clear progress file on completion
+    if (fsSync.existsSync(PROGRESS_FILE)) {
+      fsSync.unlinkSync(PROGRESS_FILE);
+      console.log('  🗑️  Cleared progress file\n');
+    }
+    
     console.log('✅ Pipeline Complete!\n');
     return { routes: enrichedRoutes, relationships, openAPIDocs };
   }

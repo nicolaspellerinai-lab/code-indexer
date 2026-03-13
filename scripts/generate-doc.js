@@ -62,6 +62,6 @@ switch (command) {
     break;
   default:
     console.log('Usage:');
-    console.log('  node scripts/generate-doc.js generate 'path' [method]');
-    console.log('  node scripts/generate-doc.js from-file 'routes.json'');
+    console.log('  node scripts/generate-doc.js generate <path> [method]');
+    console.log('  node scripts/generate-doc.js from-file <routes.json>');
 }

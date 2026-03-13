@@ -65,7 +65,7 @@ if (process.argv.includes('--force') || process.argv.includes('-f')) {
     reset();
 } else {
     console.log('⚠️  This will DELETE all indexed data:');
-    console.log('   - data/ (JSON outputs, logs)');
+    console.log('   - data/ (JSON outputs, progress, logs)');
     console.log('   - chroma-data/ (vector database)');
     console.log('\nRun with --force or -f to confirm:\n   node scripts/reset.js --force\n');
     process.exit(0);

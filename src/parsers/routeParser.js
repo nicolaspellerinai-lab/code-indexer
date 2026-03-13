@@ -21,9 +21,12 @@ class RouteParser {
    * @param {string} sourceCode - Code source du fichier
    * @returns {Endpoint[]} Tableau des endpoints trouvés
    */
-  parse(filePath, sourceCode) {
-    this.endpoints = [];
-    this.framework = 'unknown';
+  parse(filePath, sourceCode, append = false) {
+    // Reset only if not appending (i.e., first file or explicit reset)
+    if (!append) {
+      this.endpoints = [];
+      this.framework = 'unknown';
+    }
     
     if (!sourceCode || typeof sourceCode !== 'string') {
       console.warn(`⚠️ No source code provided for ${filePath}`);
@@ -499,11 +502,11 @@ class RouteParser {
   /**
    * Méthode de compatibilité pour parser un fichier
    */
-  async parseFile(filePath) {
+  async parseFile(filePath, append = false) {
     const fs = require('fs').promises;
     try {
       const content = await fs.readFile(filePath, 'utf-8');
-      return this.parse(filePath, content);
+      return this.parse(filePath, content, append);
     } catch (error) {
       console.error(`❌ Error reading ${filePath}:`, error.message);
       return [];

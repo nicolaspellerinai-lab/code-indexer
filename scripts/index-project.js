@@ -6,7 +6,8 @@ const args = process.argv.slice(2);
 const options = {
   host: null,
   port: null,
-  model: null
+  model: null,
+  resume: true // Default to resume if progress exists
 };
 
 for (let i = 0; i < args.length; i++) {
@@ -19,6 +20,8 @@ for (let i = 0; i < args.length; i++) {
   } else if (args[i] === '--model' && args[i + 1]) {
     options.model = args[i + 1];
     i++;
+  } else if (args[i] === '--no-resume') {
+    options.resume = false;
   }
 }
 

@@ -1,5 +1,60 @@
 const http = require('http');
 const fs = require('fs').promises;
+const fsSync = require('fs');
+const path = require('path');
+
+// Logging configuration (disabled by default to avoid permission issues on Windows)
+const LOG_ENABLED = false; // Set to true to enable LLM call logging
+const LOG_DIR = path.join(__dirname, '..', '..', 'data', 'llm-logs');
+
+function ensureLogDir() {
+  if (!LOG_ENABLED) return;
+  try {
+    if (!fsSync.existsSync(LOG_DIR)) {
+      fsSync.mkdirSync(LOG_DIR, { recursive: true });
+    }
+  } catch (e) {
+    // Ignore directory creation errors - logging is optional
+  }
+}
+
+function logLLMCall(endpoint, prompt, response, success, fallbackUsed) {
+  if (!LOG_ENABLED) return null;
+  
+  try {
+    ensureLogDir();
+    const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const routeKey = `${endpoint.method}_${(endpoint.fullPath || endpoint.path).replace(/[^a-zA-Z0-9]/g, '_')}`;
+    const logFile = path.join(LOG_DIR, `${routeKey}_${timestamp}.json`);
+    
+    const logEntry = {
+      timestamp: new Date().toISOString(),
+      endpoint: {
+        method: endpoint.method,
+        path: endpoint.fullPath || endpoint.path,
+        handler: endpoint.handler?.name
+      },
+      prompt,
+      response: response?.substring(0, 2000), // Limit response size in log
+      success,
+      fallbackUsed
+    };
+    
+    fsSync.writeFileSync(logFile, JSON.stringify(logEntry, null, 2));
+    return logFile;
+  } catch (e) {
+    // Silently ignore logging errors - don't crash the pipeline
+    console.warn('  ⚠️ Logging failed:', e.message);
+    return null;
+  }
+}
+
+function appendToSessionLog(entry) {
+  ensureLogDir();
+  const sessionFile = path.join(LOG_DIR, 'session.log');
+  const line = `[${entry.timestamp}] ${entry.endpoint.method} ${entry.endpoint.path} - Success: ${entry.success}, Fallback: ${entry.fallbackUsed}\n`;
+  fsSync.appendFileSync(sessionFile, line);
+}
 
 class LlmEnricherV2 {
   constructor(options = {}) {
@@ -9,6 +64,7 @@ class LlmEnricherV2 {
     this.timeout = options.timeout || 120000; // 2 minutes timeout
     this.mockMode = options.mockMode || false;
     this.strategy = options.strategy || 'single'; // 'single' ou 'multi'
+    this.onProgress = options.onProgress || null; // Callback for progress updates
   }
 
   async checkConnection() {
@@ -35,17 +91,30 @@ class LlmEnricherV2 {
     console.log(`  🔄 Enriching ${endpoints.length} endpoints using strategy: ${this.strategy}`);
     
     const results = [];
+    const total = endpoints.length;
+    
     for (let i = 0; i < endpoints.length; i++) {
       const endpoint = endpoints[i];
-      process.stdout.write(`  📝 ${i + 1}/${endpoints.length}: ${endpoint.method} ${endpoint.fullPath}... `);
+      const current = i + 1;
+      process.stdout.write(`  📝 ${current}/${total}: ${endpoint.method} ${endpoint.path || endpoint.fullPath || 'unknown'}... `);
       
       try {
         const enriched = await this.enrichEndpoint(endpoint);
         results.push(enriched);
         console.log('✅');
+        
+        // Call progress callback if provided
+        if (this.onProgress) {
+          this.onProgress(current, total, enriched);
+        }
       } catch (e) {
         console.log(`❌: ${e.message}`);
         results.push({ ...endpoint, llmEnrichment: this.getFallbackEnrichment(endpoint) });
+        
+        // Call progress callback even on failure
+        if (this.onProgress) {
+          this.onProgress(current, total, endpoint);
+        }
       }
     }
     
@@ -75,11 +144,21 @@ class LlmEnricherV2 {
     const prompt = this.buildSinglePassPrompt(endpoint, code, jsdoc, parsed);
     
     let llmResult = null;
+    let llmSuccess = false;
+    let fallbackUsed = true;
+    
     try {
       const response = await this.callOllama(prompt, 1500);
       llmResult = this.parseJsonResponse(response);
+      llmSuccess = !!llmResult;
+      fallbackUsed = !llmResult;
+      
+      // Log the LLM call
+      logLLMCall(endpoint, prompt, response, llmSuccess, fallbackUsed);
     } catch (e) {
       console.warn('  ⚠️ LLM call failed:', e.message);
+      // Log the failed call
+      logLLMCall(endpoint, prompt, e.message, false, true);
     }
 
     if (!llmResult) {
@@ -176,34 +255,67 @@ class LlmEnricherV2 {
 
   // ============ MULTI PASS STRATEGY ============
   async enrichMultiPass(endpoint, code, jsdoc, parsed) {
+    // Get handler code preview for all passes
+    const method = endpoint.method;
+    const path = endpoint.fullPath || endpoint.path;
+    const handler = endpoint.handler?.name || 'anonymous';
+    const codePreview = this.getHandlerCodePreview(code, handler, 2500);
+
     // Pass 1: Summary + Description + OperationId
-    const pass1Prompt = this.buildPass1Prompt(endpoint, code, jsdoc);
+    const pass1Prompt = this.buildMetadataPrompt({
+      method,
+      path,
+      handler,
+      jsdoc,
+      codePreview
+    });
     let pass1Result = null;
     try {
       const response = await this.callOllama(pass1Prompt, 400);
       pass1Result = this.parseJsonResponse(response);
+      // Log pass 1
+      logLLMCall(endpoint, pass1Prompt, response, !!pass1Result, !pass1Result);
     } catch (e) {
       console.warn('  ⚠️ Pass 1 failed');
+      logLLMCall(endpoint, pass1Prompt, e.message, false, true);
     }
 
     // Pass 2: Schemas (input/output)
-    const pass2Prompt = this.buildPass2Prompt(endpoint, code, parsed);
+    const pass2Prompt = this.buildSchemaPrompt({
+      method,
+      path,
+      handler,
+      parsed,
+      codePreview
+    });
     let pass2Result = null;
     try {
       const response = await this.callOllama(pass2Prompt, 600);
       pass2Result = this.parseJsonResponse(response);
+      // Log pass 2
+      logLLMCall(endpoint, pass2Prompt, response, !!pass2Result, !pass2Result);
     } catch (e) {
       console.warn('  ⚠️ Pass 2 failed');
+      logLLMCall(endpoint, pass2Prompt, e.message, false, true);
     }
 
     // Pass 3: Responses + Examples
-    const pass3Prompt = this.buildPass3Prompt(endpoint, code, parsed);
+    const pass3Prompt = this.buildResponsesPrompt({
+      method,
+      path,
+      handler,
+      parsed,
+      codePreview
+    });
     let pass3Result = null;
     try {
       const response = await this.callOllama(pass3Prompt, 500);
       pass3Result = this.parseJsonResponse(response);
+      // Log pass 3
+      logLLMCall(endpoint, pass3Prompt, response, !!pass3Result, !pass3Result);
     } catch (e) {
       console.warn('  ⚠️ Pass 3 failed');
+      logLLMCall(endpoint, pass3Prompt, e.message, false, true);
     }
 
     // Parse ONLY the handler code for this specific route, use route path to find it
@@ -242,177 +354,179 @@ class LlmEnricherV2 {
     // Get full handler code (chunked if needed)
     const codePreview = this.getHandlerCodePreview(code, handler, 3000);
 
-    return `You are an OpenAPI/Swagger expert. Analyze this Express.js endpoint and generate complete Swagger documentation.
+  return `You are an expert API documentation generator. Analyze this Express.js endpoint to extract input/output parameters and generate a complete OpenAPI/Swagger JSON definition.
 
 Endpoint: ${method} ${path}
 Handler: ${handler}
 API Description: "${jsdoc.description || 'N/A'}"
 
-FULL HANDLER CODE:
+--- CODE TO ANALYZE ---
 \`\`\`javascript
 ${codePreview}
 \`\`\`
 
-ANALYZE THE CODE CAREFULLY. Extract ONLY the parameters that are ACTUALLY USED in the code:
-
-分析方法:
-1. Chercher req.query.NOM pour les query params
-2. Chercher req.params.NOM pour les path params  
-3. Chercher req.body.NOM pour les body fields
-4. Chercher res.json(...) pour outputSchema
-5. Chercher middleware auth/require pour requiresAuth
-
-⚠️ CRITICAL RULES - VERY IMPORTANT:
-- SI req.query n'est PAS utilisé dans le code → queryParams = [] (EMPTY ARRAY)
-- SI req.params n'est PAS utilisé dans le code → pathParams = [] (EMPTY ARRAY)
-- SI req.body n'est PAS utilisé dans le code → bodyFields = [] (EMPTY ARRAY)
-- NE JAMAIS inventer des paramètres qui n'existent pas dans le code
-- NE PAS utiliser de template comme "page, limit, search" sauf si présent dans le code
-- SI c'est une route de login/register → requiresAuth = false
-
-Detected from code analysis:
-- Path params in route: ${JSON.stringify(parsed.pathParams)}
-- Query params used: ${JSON.stringify(parsed.queryParams)}
-- Body fields used: ${JSON.stringify(parsed.bodyFields)}
+--- PRE-EXTRACTED BASELINE (From Regex) ---
+- Path params: ${JSON.stringify(parsed.pathParams)}
+- Query params: ${JSON.stringify(parsed.queryParams)}
+- Body fields: ${JSON.stringify(parsed.bodyFields)}
 - Output fields: ${JSON.stringify(parsed.outputFields)}
 
-Return a JSON object with ALL these fields:
+--- EXTRACTION & ANALYSIS RULES ---
+1. DESTRUCTURING: Look for destructured variables (e.g., \`const { id, name } = req.body;\`) in addition to direct access (\`req.body.name\`).
+2. VALIDATION & CORRECTION: The "PRE-EXTRACTED BASELINE" is only a hint. You MUST verify it against the actual code.
+   - ADD ANY MISSING parameters (especially those missed due to destructuring or deep object access).
+   - REMOVE ANY INCORRECT parameters (false positives from regex, e.g., commented code, local variables mistaken for body fields).
+3. ENRICHMENT: For all validated parameters, determine the data types (string, number, boolean, array, object) based on how variables are used, validated, or mapped in the code.
+4. REQUIRED FIELDS: Identify if a parameter is required by looking for validation logic (e.g., \`if (!email)\`, Joi/Zod schemas, or express-validator usage).
+5. OUTPUT SCHEMA: Analyze \`res.json(...)\`, \`res.send(...)\`, or returned service objects to accurately map the \`outputSchema\` properties.
+6. NO HALLUCINATION: NEVER invent parameters that are not in the code. If a property (query, body, params) is empty or unused after your validation, output an empty object {} for it.
+7. AUTHENTICATION: If the route is related to login/register/signup, set security to empty. Otherwise, check for auth middlewares to populate the security field.
+
+Return ONLY a valid JSON object matching this exact structure. Do not wrap in markdown tags (\`\`\`json):
+
 {
-  "summary": "Brief description (10-15 words, action-oriented, e.g., 'Get paginated list of electors')",
-  "description": "Detailed description (1-2 sentences, explain what the endpoint does)",
-  "operationId": "camelCase function name (e.g., 'getElectors', 'createElector', 'updateElector')",
-  "tags": ["Resource name", "Category] (e.g., ["Electors", "CRUD"])",
+  "summary": "Brief description (10-15 words, action-oriented)",
+  "description": "Detailed description explaining the endpoint's purpose.",
+  "operationId": "camelCaseName (e.g., getElectors)",
+  "tags": ["ResourceName"],
   "deprecated": false,
   "security": [{"bearerAuth": []}],
   "inputSchema": {
-    "path": { "paramName": { "type": "string", "required": true } },
-    "query": { "paramName": { "type": "string", "required": false, "description": "..." } },
-    "body": { "type": "object", "properties": { "field": { "type": "string", "description": "..." } }, "required": ["requiredField"] }
+    "path": { 
+      "paramName": { "type": "string", "required": true, "description": "Derived from code context" } 
+    },
+    "query": { 
+      "paramName": { "type": "string", "required": false, "description": "..." } 
+    },
+    "body": { 
+      "type": "object", 
+      "properties": { 
+        "fieldName": { "type": "string", "description": "..." } 
+      }, 
+      "required": ["fieldNameIfMandatory"] 
+    }
   },
-  "outputSchema": { "type": "object", "properties": { "field": { "type": "string" } } },
+  "outputSchema": { 
+    "type": "object", 
+    "properties": { 
+      "field": { "type": "string" } 
+    } 
+  },
   "responses": {
     "200": { "description": "Success", "schema": { "type": "object" } },
-    "201": { "description": "Created" },
     "400": { "description": "Bad Request" },
-    "401": { "description": "Unauthorized - Authentication required" },
-    "403": { "description": "Forbidden - Insufficient permissions" },
+    "401": { "description": "Unauthorized" },
     "404": { "description": "Not Found" },
-    "409": { "description": "Conflict - Resource already exists" },
     "500": { "description": "Internal Server Error" }
   },
   "examples": {
-    "request": { "body": { "field": "value" } },
-    "response": { "status": "success", "data": { ... } }
+    "request": { "body": { "fieldName": "exampleValue" } },
+    "response": { "status": "success", "data": {} }
   }
-}
-
-IMPORTANT: Use the detected params from code analysis. If queryParams array is empty, use empty object for query in inputSchema.
-
-Return ONLY valid JSON, no markdown.`;
+}`;
   }
 
-  buildPass1Prompt(endpoint, code, jsdoc) {
-    const method = endpoint.method;
-    const path = endpoint.fullPath || endpoint.path;
-    const handler = endpoint.handler?.name || 'anonymous';
-    const codePreview = this.getHandlerCodePreview(code, handler, 2500);
-
-    return `Generate metadata for this Express endpoint:
+  buildMetadataPrompt({ method, path, handler, jsdoc, codePreview }) {
+    return `You are an expert API documentation generator. Generate metadata for this Express.js endpoint.
 
 Endpoint: ${method} ${path}
 Handler: ${handler}
 Current description: "${jsdoc.description || 'N/A'}"
 
-⚠️ AUTH DETECTION - VERY IMPORTANT:
-- Look for middleware like: auth, require, isAuthenticated, verifyToken
-- Check if route is: /auth/login, /auth/register, /login, /register → requiresAuth = false
-- If auth middleware is used → requiresAuth = true
-- If it's a login/register route → requiresAuth = false
-
-Code:
+--- CODE TO ANALYZE ---
 \`\`\`javascript
 ${codePreview}
 \`\`\`
 
-Return JSON:
+--- EXTRACTION RULES ---
+1. AUTHENTICATION: Check for auth middlewares (e.g., auth, requireAuth, isAuthenticated, verifyToken).
+   - If the route is related to login/register/signup (e.g., /auth/login), set "security" to [].
+   - If an auth middleware is present, set "security" to [{"bearerAuth": []}].
+2. METADATA: Infer a concise summary, a detailed description, a camelCase operationId, and appropriate tags based on the endpoint path and code logic.
+
+Return ONLY a valid JSON object matching this exact structure. Do not wrap in markdown tags (\`\`\`json):
 {
-  "summary": "Brief (10-15 words)",
-  "description": "1-2 sentences",
-  "operationId": "camelCaseName",
-  "tags": ["Resource", "Category"],
+  "summary": "Brief description (10-15 words, action-oriented)",
+  "description": "Detailed description explaining the endpoint's purpose.",
+  "operationId": "camelCaseName (e.g., getElectors)",
+  "tags": ["ResourceName", "Category"],
   "deprecated": false,
   "security": [{"bearerAuth": []}]
-}
-
-If login/register route → "security": [] (no auth required)
-
-Return ONLY JSON.`;
+}`;
   }
 
-  buildPass2Prompt(endpoint, code, parsed) {
-    const method = endpoint.method;
-    const path = endpoint.fullPath || endpoint.path;
-    const handler = endpoint.handler?.name || 'anonymous';
-    const codePreview = this.getHandlerCodePreview(code, handler, 2500);
-
-    return `Generate input/output schemas for this Express endpoint:
+  buildSchemaPrompt({ method, path, handler, parsed, codePreview }) {
+    return `You are an expert API documentation generator. Generate input and output schemas for this Express.js endpoint.
 
 Endpoint: ${method} ${path}
 Handler: ${handler}
 
-⚠️ CRITICAL - Use ONLY these detected parameters from code analysis:
-- Detected path params: ${JSON.stringify(parsed.pathParams)}
-- Detected query params: ${JSON.stringify(parsed.queryParams)}
-- Detected body fields: ${JSON.stringify(parsed.bodyFields)}
-- Detected output fields: ${JSON.stringify(parsed.outputFields)}
-
-RULES:
-- If queryParams is empty → query = {} (empty object, NOT { "page": {...}, "limit": {...} })
-- If bodyFields is empty → body = null or body not included
-- If outputFields is empty → analyze res.json() calls in the code to find actual output
-- NEVER invent parameters not in the lists above
-
-Code:
+--- CODE TO ANALYZE ---
 \`\`\`javascript
 ${codePreview}
 \`\`\`
 
-Look at res.json(...) calls in the code to determine outputSchema fields.
+--- PRE-EXTRACTED BASELINE (From Regex) ---
+- Path params: ${JSON.stringify(parsed.pathParams)}
+- Query params: ${JSON.stringify(parsed.queryParams)}
+- Body fields: ${JSON.stringify(parsed.bodyFields)}
+- Output fields: ${JSON.stringify(parsed.outputFields)}
 
-Return JSON with inputSchema and outputSchema:
+--- EXTRACTION & ANALYSIS RULES ---
+1. DESTRUCTURING: Look for destructured variables (e.g., \`const { id, name } = req.body;\`) in addition to direct access (\`req.body.name\`).
+2. VALIDATION & CORRECTION: The "PRE-EXTRACTED BASELINE" is only a hint. You MUST verify it against the actual code.
+   - ADD ANY MISSING parameters (missed by regex, destructuring).
+   - REMOVE ANY INCORRECT parameters (false positives, commented code).
+3. ENRICHMENT: For all validated parameters, determine the data types (string, number, boolean, array, object).
+4. REQUIRED FIELDS: Identify if a parameter is required by looking for validation logic (\`if (!email)\`, Joi/Zod, etc.).
+5. OUTPUT SCHEMA: Analyze \`res.json(...)\` or \`res.send(...)\` calls to determine the actual output fields.
+6. NO HALLUCINATION: NEVER invent parameters. If query, body, or params are unused after validation, output an empty object {}.
+
+Return ONLY a valid JSON object matching this exact structure. Do not wrap in markdown tags (\`\`\`json):
 {
   "inputSchema": {
-    "path": { "id": { "type": "string", "required": true } },
-    "query": { "page": { "type": "integer", "required": false } },
-    "body": { "type": "object", "properties": { "name": { "type": "string" } }, "required": ["name"] }
+    "path": { 
+      "paramName": { "type": "string", "required": true } 
+    },
+    "query": { 
+      "paramName": { "type": "string", "required": false } 
+    },
+    "body": { 
+      "type": "object", 
+      "properties": { 
+        "fieldName": { "type": "string" } 
+      }, 
+      "required": ["fieldNameIfMandatory"] 
+    }
   },
-  "outputSchema": { "type": "object", "properties": { "id": { "type": "string" } } }
-}
-
-If no params detected, use empty objects: "query": {}
-
-Return ONLY JSON.`;
+  "outputSchema": { 
+    "type": "object", 
+    "properties": { 
+      "field": { "type": "string" } 
+    } 
+  }
+}`;
   }
 
-  buildPass3Prompt(endpoint, code, parsed) {
-    const method = endpoint.method;
-    const path = endpoint.fullPath || endpoint.path;
-    const handler = endpoint.handler?.name || 'anonymous';
-    const codePreview = this.getHandlerCodePreview(code, handler, 2500);
-
-    return `Generate HTTP responses and examples for this Express endpoint:
+  buildResponsesPrompt({ method, path, handler, parsed, codePreview }) {
+    return `You are an expert API documentation generator. Generate HTTP responses and examples for this Express.js endpoint.
 
 Endpoint: ${method} ${path}
 Handler: ${handler}
 
-Detected output: ${JSON.stringify(parsed.outputFields)}
+--- DETECTED OUTPUT FIELDS ---
+${JSON.stringify(parsed.outputFields)}
 
-Code:
+--- CODE TO ANALYZE ---
 \`\`\`javascript
 ${codePreview}
 \`\`\`
 
-Return JSON:
+--- EXTRACTION RULES ---
+1. HTTP STATUS CODES: Analyze the code for specific \`res.status(...)\` or \`res.sendStatus(...)\` calls to populate the responses object dynamically. Include standard error codes (400, 401, 403, 404, 500) based on validation and error handling logic present in the code.
+2. EXAMPLES: Generate realistic JSON examples for the request body and the successful response based on the endpoint context and detected output fields.
+
+Return ONLY a valid JSON object matching this exact structure. Do not wrap in markdown tags (\`\`\`json):
 {
   "responses": {
     "200": { "description": "Success", "schema": { "type": "object" } },
@@ -423,12 +537,10 @@ Return JSON:
     "500": { "description": "Internal Server Error" }
   },
   "examples": {
-    "request": { "body": { "field": "value" } },
-    "response": { "status": "success", "data": { } }
+    "request": { "body": { "fieldName": "realisticExampleValue" } },
+    "response": { "status": "success", "data": {} }
   }
-}
-
-Return ONLY JSON.`;
+}`;
   }
 
   // ============ CODE ANALYSIS ============
@@ -731,13 +843,19 @@ Return ONLY JSON.`;
       body: null
     };
 
+    // Safely handle parsed object
+    const safeParsed = parsed || {};
+    const pathParams = safeParsed.pathParams || [];
+    const queryParams = safeParsed.queryParams || [];
+    const bodyFields = safeParsed.bodyFields || [];
+
     // Path params
-    for (const p of parsed.pathParams) {
+    for (const p of pathParams) {
       schema.path[p] = { type: 'string', required: true };
     }
 
     // Query params
-    for (const p of parsed.queryParams) {
+    for (const p of queryParams) {
       schema.query[p] = { type: 'string', required: false };
     }
 
@@ -749,7 +867,7 @@ Return ONLY JSON.`;
     }
 
     // Build body schema from parsed fields if not provided and not GET
-    if (!schema.body && !isGet && parsed.bodyFields.length > 0) {
+    if (!schema.body && !isGet && bodyFields.length > 0) {
       schema.body = {
         type: 'object',
         properties: {},
