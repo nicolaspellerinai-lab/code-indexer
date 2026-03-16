@@ -139,24 +139,34 @@ function extractSwaggerDocs(code) {
   return docs;
 }
 
-// Find route handler positions
+// Find route handler positions - improved version
 function findRoutePositions(code) {
   const positions = {};
   const lines = code.split('\n');
   
-  // Match router.METHOD calls
-  const routerRegex = /router\.(get|post|put|patch|delete|options)\s*\(\s*['"`\/]+([^'"`\/]+)/g;
+  // Match router.METHOD calls - multiple patterns
+  const patterns = [
+    /router\.(get|post|put|patch|delete|options|head)\s*\(\s*['"`\/]+([^'"`\/]+)/g,
+    /router\.(get|post|put|patch|delete|options|head)\s*\(\s*\(([^)]+)\)\s*,\s*['"`\/]+([^'"`\/]+)/g,
+    /\.(get|post|put|patch|delete|options|head)\s*\(\s*['"`\/]+([^'"`\/]+)/g
+  ];
   
-  let match;
-  while ((match = routerRegex.exec(code)) !== null) {
-    const method = match[1].toUpperCase();
-    const routePath = match[2];
-    const lineNumber = code.substring(0, match.index).split('\n').length;
-    
-    positions[`${method} ${routePath}`] = {
-      lineNumber,
-      code: lines[lineNumber - 1]?.trim() || ''
-    };
+  for (const pattern of patterns) {
+    let match;
+    while ((match = pattern.exec(code)) !== null) {
+      const method = match[1].toUpperCase();
+      // routePath could be in different capture groups depending on pattern
+      const routePath = match[2] || match[3];
+      if (!routePath) continue;
+      
+      const lineNumber = code.substring(0, match.index).split('\n').length;
+      
+      // Store multiple key formats for better matching
+      const cleanPath = routePath.replace(/^\//, '');
+      positions[`${method} ${routePath}`] = { lineNumber, code: lines[lineNumber - 1]?.trim() || '' };
+      positions[`${method} /${cleanPath}`] = { lineNumber, code: lines[lineNumber - 1]?.trim() || '' };
+      positions[`${method} ${cleanPath}`] = { lineNumber, code: lines[lineNumber - 1]?.trim() || '' };
+    }
   }
   
   return positions;
@@ -300,14 +310,36 @@ for (const [pathKey, methods] of Object.entries(openAPIData.paths)) {
       
       // Try to find the route handler position in the source file
       let pos = null;
-      if (sourceFile && fs.existsSync(sourceFile)) {
+      let routeLineNumber = null;
+      
+      // First, try to get line number from the route data itself
+      if (routesByFile) {
+        for (const [file, routes] of Object.entries(routesByFile)) {
+          const route = routes.find(r => 
+            (r.method?.toUpperCase() === method.toUpperCase() || r.method === method) &&
+            (r.path === pathKey || r.fullPath === pathKey || r.path === pathKey.replace(/^\//, ''))
+          );
+          
+          if (route && route.line && route.line > 0) {
+            sourceFile = file;
+            routeLineNumber = route.line;
+            break;
+          }
+        }
+      }
+      
+      // If no line from route data, try to find it in the source code
+      if (!routeLineNumber && sourceFile && fs.existsSync(sourceFile)) {
         const fileCode = fs.readFileSync(sourceFile, 'utf-8');
         const positions = findRoutePositions(fileCode);
         const routeKey = `${method.toUpperCase()} /${pathKey.replace(/^\//, '')}`;
         pos = positions[routeKey];
+        if (pos) {
+          routeLineNumber = pos.lineNumber;
+        }
       }
       
-      if (pos || (sourceFile && fs.existsSync(sourceFile))) {
+      if (routeLineNumber || (sourceFile && fs.existsSync(sourceFile))) {
         const newBlock = generateSwaggerBlock(method.toUpperCase(), pathKey, spec);
         
         const patch = {
@@ -316,7 +348,7 @@ for (const [pathKey, methods] of Object.entries(openAPIData.paths)) {
           path: pathKey,
           action: 'insert',
           file: sourceFile,
-          insertBeforeLine: pos?.lineNumber || 1,
+          insertBeforeLine: routeLineNumber || pos?.lineNumber || 1,
           newContent: newBlock,
           diff: {
             old: '',
@@ -330,8 +362,8 @@ for (const [pathKey, methods] of Object.entries(openAPIData.paths)) {
         
         console.log(`🆕 NOUVEAU: ${method.toUpperCase()} ${pathKey}`);
         console.log(`   Fichier: ${sourceFile}`);
-        if (pos) {
-          console.log(`   Insérer avant ligne: ${pos.lineNumber}\n`);
+        if (routeLineNumber) {
+          console.log(`   Insérer avant ligne: ${routeLineNumber}\n`);
         } else {
           console.log(`   (position non trouvée)\n`);
         }

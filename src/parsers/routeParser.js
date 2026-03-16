@@ -139,8 +139,18 @@ class RouteParser {
             // Extraire les middleware
             const middleware = self.extractMiddleware(path, sourceCode);
             
+            // Extraire les header parameters basé sur le middleware
+            const headerParameters = self.extractHeaderParameters(middleware.names);
+            
             // Extraire le handler (fonction)
             const handler = self.extractHandler(path);
+            
+            // Extraire le body schema depuis le code source
+            let bodySchema = null;
+            if (handler) {
+              // Extraire le code du handler depuis le fichier source
+              bodySchema = self.extractBodySchema(handler, sourceCode);
+            }
             
             // Créer l'endpoint
             const endpoint = {
@@ -152,6 +162,8 @@ class RouteParser {
               framework: self.framework,
               middleware: middleware.names,
               middlewareLines: middleware.lines,
+              headerParameters: headerParameters,
+              bodySchema: bodySchema,
               handler: handler,
               description: '',
               parameters: [],
@@ -328,6 +340,91 @@ class RouteParser {
   }
 
   /**
+   * Extrait les header parameters basés sur le middleware détecté
+   * Si 'auth' est présent, ajoute Authorization header
+   */
+  extractHeaderParameters(middlewareNames) {
+    const headerParameters = [];
+    
+    // Détecter le middleware d'authentification
+    const hasAuth = middlewareNames.some(m => 
+      m.includes('auth') || 
+      m.includes('Auth') || 
+      m.includes('requireAuth') || 
+      m.includes('isAuthenticated') ||
+      m.includes('verifyToken')
+    );
+    
+    if (hasAuth) {
+      headerParameters.push({
+        name: 'Authorization',
+        in: 'header',
+        required: true,
+        type: 'string',
+        description: 'Authorization: token returned from user/signin'
+      });
+    }
+    
+    return headerParameters;
+  }
+
+  /**
+   * Extrait les body schemas depuis le code source du handler
+   */
+  extractBodySchema(handler, sourceCode) {
+    if (!handler || !sourceCode) return null;
+    
+    const bodyFields = [];
+    const requiredFields = [];
+    
+    // Analyser le code source pour trouver req.body
+    // Détecter req.body.property
+    const bodyDotMatches = sourceCode.matchAll(/req\.body\.(\w+)/g);
+    for (const m of bodyDotMatches) {
+      if (!bodyFields.includes(m[1])) {
+        bodyFields.push(m[1]);
+      }
+    }
+    
+    // Détecter const { field1, field2 } = req.body
+    const bodyDestructure = sourceCode.match(/const\s*\{\s*([^}]+)\s*\}\s*=\s*req\.body/);
+    if (bodyDestructure) {
+      const fields = bodyDestructure[1].split(',').map(s => s.trim());
+      for (const f of fields) {
+        if (!bodyFields.includes(f)) {
+          bodyFields.push(f);
+          // Tous les champs dans le destructuring sont requis
+          if (!requiredFields.includes(f)) {
+            requiredFields.push(f);
+          }
+        }
+      }
+    }
+    
+    // Détecter const field = req.body.field
+    const bodyVarMatches = sourceCode.matchAll(/const\s+(\w+)\s*=\s*req\.body/g);
+    for (const m of bodyVarMatches) {
+      if (!bodyFields.includes(m[1])) {
+        bodyFields.push(m[1]);
+      }
+    }
+    
+    if (bodyFields.length === 0) return null;
+    
+    // Générer le schéma
+    const properties = {};
+    for (const field of bodyFields) {
+      properties[field] = { type: 'string' };
+    }
+    
+    return {
+      type: 'object',
+      properties,
+      required: requiredFields.length > 0 ? requiredFields : undefined
+    };
+  }
+
+  /**
    * Extrait le handler de la route (dernier argument)
    */
   extractHandler(path) {
@@ -342,7 +439,8 @@ class RouteParser {
       return {
         type: 'reference',
         name: node.name,
-        line: node.loc?.start?.line || 0
+        line: node.loc?.start?.line || 0,
+        node: node // Stocker le node pour extraire le body schema
       };
     }
     
@@ -359,6 +457,7 @@ class RouteParser {
         type: 'inline',
         name: functionName,
         line: node.loc?.start?.line || 0,
+        node: node, // Stocker le node pour extraire le body schema
         params: this.extractFunctionParams(node),
         body: this.extractFunctionBody(node)
       };

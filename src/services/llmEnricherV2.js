@@ -126,22 +126,28 @@ class LlmEnricherV2 {
     const jsdoc = this.extractJSDoc(endpoint.docBlock);
     const parsed = this.parseCode(code, endpoint);
     
+    // Ajouter les header parameters extraits par le parser
+    const headerParameters = endpoint.headerParameters || [];
+    
+    // Ajouter le body schema extrait par le parser
+    const bodySchema = endpoint.bodySchema || null;
+    
     if (this.strategy === 'multi') {
-      return await this.enrichMultiPass(endpoint, code, jsdoc, parsed);
+      return await this.enrichMultiPass(endpoint, code, jsdoc, parsed, headerParameters, bodySchema);
     } else {
-      return await this.enrichSinglePass(endpoint, code, jsdoc, parsed);
+      return await this.enrichSinglePass(endpoint, code, jsdoc, parsed, headerParameters, bodySchema);
     }
   }
 
   // ============ SINGLE PASS STRATEGY ============
-  async enrichSinglePass(endpoint, code, jsdoc, parsed) {
+  async enrichSinglePass(endpoint, code, jsdoc, parsed, headerParameters, bodySchema) {
     // Parse ONLY the handler code for this specific route FIRST
     // This ensures we have accurate params even if LLM fails
     const routePath = endpoint.path;
     const handlerCode = this.getHandlerCodePreview(code, routePath, 800, endpoint.method);
     const handlerParsed = this.parseCode(handlerCode, endpoint);
     
-    const prompt = this.buildSinglePassPrompt(endpoint, code, jsdoc, parsed);
+    const prompt = this.buildSinglePassPrompt(endpoint, code, jsdoc, parsed, headerParameters, bodySchema);
     
     let llmResult = null;
     let llmSuccess = false;
@@ -163,7 +169,7 @@ class LlmEnricherV2 {
 
     if (!llmResult) {
       // Use handler-specific parsed data for fallback, not full-file parsed
-      return { ...endpoint, llmEnrichment: this.getFallbackEnrichment(endpoint, handlerParsed) };
+      return { ...endpoint, llmEnrichment: this.getFallbackEnrichment(endpoint, handlerParsed, headerParameters) };
     }
     
     return {
@@ -176,9 +182,11 @@ class LlmEnricherV2 {
         deprecated: llmResult.deprecated || false,
         // For security: use LLM result only for login/register routes, otherwise use parsed
         security: this.shouldUseLLMSecurity(endpoint, llmResult) ? llmResult.security : [{ bearerAuth: [] }],
+        // Use header parameters extracted by parser
+        headerParameters: headerParameters,
         // Use parsed data for params - never trust LLM for these
         // Filter by actual presence in handler code to remove extras
-        inputSchema: this.buildInputSchemaFromParsed(handlerParsed, endpoint.method, handlerCode),
+        inputSchema: this.buildInputSchemaFromParsed(handlerParsed, endpoint.method, handlerCode, bodySchema),
         // For outputSchema: use LLM only if it has real data, otherwise use parsed
         outputSchema: this.buildOutputSchemaFromParsed(handlerParsed, llmResult.outputSchema),
         responses: llmResult.responses || this.buildDefaultResponses(endpoint, handlerParsed),
@@ -203,7 +211,7 @@ class LlmEnricherV2 {
     return params.filter(p => handlerCode.includes(p));
   }
 
-  buildInputSchemaFromParsed(parsed, method, handlerCode) {
+  buildInputSchemaFromParsed(parsed, method, handlerCode, bodySchema) {
     const httpMethod = (method || 'GET').toUpperCase();
     const isGet = httpMethod === 'GET';
     
@@ -219,16 +227,21 @@ class LlmEnricherV2 {
       schema.query[p] = { type: 'string', required: false };
     }
 
-    // Filter body fields by actual presence in handler code
-    const validBodyFields = this.filterParamsByCode(parsed.bodyFields, handlerCode);
-    if (!isGet && validBodyFields && validBodyFields.length > 0) {
-      schema.body = {
-        type: 'object',
-        properties: {},
-        required: []
-      };
-      for (const field of validBodyFields) {
-        schema.body.properties[field] = { type: 'string' };
+    // Use body schema extracted by parser if available
+    if (bodySchema) {
+      schema.body = bodySchema;
+    } else {
+      // Filter body fields by actual presence in handler code
+      const validBodyFields = this.filterParamsByCode(parsed.bodyFields, handlerCode);
+      if (!isGet && validBodyFields && validBodyFields.length > 0) {
+        schema.body = {
+          type: 'object',
+          properties: {},
+          required: []
+        };
+        for (const field of validBodyFields) {
+          schema.body.properties[field] = { type: 'string' };
+        }
       }
     }
 
@@ -254,7 +267,7 @@ class LlmEnricherV2 {
   }
 
   // ============ MULTI PASS STRATEGY ============
-  async enrichMultiPass(endpoint, code, jsdoc, parsed) {
+  async enrichMultiPass(endpoint, code, jsdoc, parsed, headerParameters, bodySchema) {
     // Get handler code preview for all passes
     const method = endpoint.method;
     const path = endpoint.fullPath || endpoint.path;
@@ -280,13 +293,14 @@ class LlmEnricherV2 {
       logLLMCall(endpoint, pass1Prompt, e.message, false, true);
     }
 
-    // Pass 2: Schemas (input/output)
+    // Pass 2: Schemas (input/output) - utilise le body schema extrait par le parser
     const pass2Prompt = this.buildSchemaPrompt({
       method,
       path,
       handler,
       parsed,
-      codePreview
+      codePreview,
+      bodySchema
     });
     let pass2Result = null;
     try {
@@ -334,9 +348,11 @@ class LlmEnricherV2 {
         deprecated: pass1Result?.deprecated || false,
         // For security: use LLM result only for login/register routes
         security: this.shouldUseLLMSecurity(endpoint, pass1Result) ? pass1Result?.security : [{ bearerAuth: [] }],
+        // Use header parameters extracted by parser
+        headerParameters: headerParameters,
         // Use parsed data for params - never trust LLM for these
         // Filter by actual presence in handler code to remove extras
-        inputSchema: this.buildInputSchemaFromParsed(handlerParsed, endpoint.method, handlerCode),
+        inputSchema: this.buildInputSchemaFromParsed(handlerParsed, endpoint.method, handlerCode, bodySchema),
         // Use LLM outputSchema only if it has actual properties
         outputSchema: this.buildOutputSchemaFromParsed(handlerParsed, pass2Result?.outputSchema),
         responses: pass3Result?.responses || this.buildDefaultResponses(endpoint, handlerParsed),
@@ -346,7 +362,7 @@ class LlmEnricherV2 {
   }
 
   // ============ PROMPTS ============
-  buildSinglePassPrompt(endpoint, code, jsdoc, parsed) {
+  buildSinglePassPrompt(endpoint, code, jsdoc, parsed, headerParameters = [], bodySchema = null) {
     const method = endpoint.method;
     const path = endpoint.fullPath || endpoint.path;
     const handler = endpoint.handler?.name || 'anonymous';
@@ -455,7 +471,7 @@ Return ONLY a valid JSON object matching this exact structure. Do not wrap in ma
 }`;
   }
 
-  buildSchemaPrompt({ method, path, handler, parsed, codePreview }) {
+  buildSchemaPrompt({ method, path, handler, parsed, codePreview, bodySchema = null }) {
     return `You are an expert API documentation generator. Generate input and output schemas for this Express.js endpoint.
 
 Endpoint: ${method} ${path}
@@ -985,7 +1001,7 @@ Return ONLY a valid JSON object matching this exact structure. Do not wrap in ma
     };
   }
 
-  getFallbackEnrichment(endpoint, parsed = {}) {
+  getFallbackEnrichment(endpoint, parsed = {}, headerParameters = []) {
     return {
       summary: this.generateStaticSummary(endpoint),
       description: endpoint.docBlock?.description || '',
@@ -993,6 +1009,7 @@ Return ONLY a valid JSON object matching this exact structure. Do not wrap in ma
       tags: this.inferTags(endpoint),
       deprecated: false,
       security: [{ bearerAuth: [] }],
+      headerParameters: headerParameters,
       inputSchema: this.mergeInputSchema(parsed, null, endpoint.method),
       outputSchema: { type: 'object', properties: {} },
       responses: this.buildDefaultResponses(endpoint, parsed),

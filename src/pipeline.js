@@ -198,8 +198,7 @@ class IndexingPipeline {
         await this.parser.parseFile(file, append);
       }
     } else {
-      // Use loaded routes
-      this.parser.routes = existingRoutes;
+      // Use loaded routes - use endpoints property since routes is getter-only
       this.parser.endpoints = existingRoutes;
     }
     
@@ -364,7 +363,17 @@ class IndexingPipeline {
         version: '1.0.0',
         description: 'Auto-generated from Express routes'
       },
-      paths: {}
+      paths: {},
+      components: {
+        schemas: {},
+        securitySchemes: {
+          bearerAuth: {
+            type: 'http',
+            scheme: 'bearer',
+            bearerFormat: 'JWT'
+          }
+        }
+      }
     };
 
     for (const route of routes) {
@@ -373,18 +382,42 @@ class IndexingPipeline {
 
       const pathKey = route.path.replace(/:([a-zA-Z0-9_]+)/g, '{$1}');
       const methodKey = route.method.toLowerCase();
+      
+      // Get LLM enrichment data
+      const enrichment = route.llmEnrichment || {};
 
       if (!docs.paths[pathKey]) {
         docs.paths[pathKey] = {};
       }
-
-      docs.paths[pathKey][methodKey] = {
-        summary: route.llmEnrichment?.summary || route.description || `Endpoint ${route.method} ${route.path}`,
-        description: route.description || route.llmEnrichment?.description || `Endpoint ${route.method} ${route.path}`,
-        tags: route.llmEnrichment?.tags || [route.framework || 'api'],
+      
+      // Build the operation
+      const operation = {
+        summary: enrichment.summary || route.description || `Endpoint ${route.method} ${route.path}`,
+        description: route.description || enrichment.description || `Endpoint ${route.method} ${route.path}`,
+        tags: enrichment.tags || [route.framework || 'api'],
         parameters: this.buildParameters(route),
-        responses: route.llmEnrichment?.responses || this.buildDefaultResponses(route)
+        responses: enrichment.responses || this.buildDefaultResponses(route),
+        security: enrichment.security || [{ bearerAuth: [] }]
       };
+      
+      // Add header parameters if present
+      if (enrichment.headerParameters && enrichment.headerParameters.length > 0) {
+        // Header parameters are already included in buildParameters
+      }
+      
+      // Add request body for POST/PUT/PATCH
+      if (['post', 'put', 'patch'].includes(methodKey) && enrichment.inputSchema?.body) {
+        operation.requestBody = {
+          required: true,
+          content: {
+            'application/json': {
+              schema: enrichment.inputSchema.body
+            }
+          }
+        };
+      }
+      
+      docs.paths[pathKey][methodKey] = operation;
     }
 
     return docs;
@@ -392,6 +425,20 @@ class IndexingPipeline {
 
   buildParameters(route) {
     const params = [];
+    const enrichment = route.llmEnrichment || {};
+
+    // Header parameters from LLM enrichment
+    if (enrichment.headerParameters) {
+      for (const header of enrichment.headerParameters) {
+        params.push({
+          name: header.name,
+          in: 'header',
+          required: header.required !== false,
+          schema: { type: header.type || 'string' },
+          description: header.description || `${header.name} header parameter`
+        });
+      }
+    }
 
     // Path parameters
     if (route.parameters) {
@@ -407,8 +454,8 @@ class IndexingPipeline {
     }
 
     // Query parameters from LLM enrichment
-    if (route.llmEnrichment?.inputSchema?.query) {
-      for (const [name, schema] of Object.entries(route.llmEnrichment.inputSchema.query)) {
+    if (enrichment.inputSchema?.query) {
+      for (const [name, schema] of Object.entries(enrichment.inputSchema.query)) {
         params.push({
           name,
           in: 'query',
@@ -512,6 +559,9 @@ class IndexingPipeline {
       JSON.stringify(enrichedRelationships, null, 2)
     );
 
+    // Save relationships by entity (split into separate files)
+    await this.saveRelationshipsByEntity(enrichedRelationships, dataDir);
+
     // Save OpenAPI spec
     await writeFileRetry(
       path.join(dataDir, 'generated-openapi.json'),
@@ -543,6 +593,55 @@ class IndexingPipeline {
     console.log('  📄 Saved: data/generated-openapi.json');
     console.log('  📄 Saved: data/routes.json (final with enrichment)');
     console.log('  📄 Saved: data/routes-by-file.json (final with enrichment)');
+  }
+
+  // Save relationships split by entity
+  async saveRelationshipsByEntity(relationships, dataDir) {
+    const entityGroups = {};
+    
+    for (const rel of relationships) {
+      const endpoint = rel.endpoint || '';
+      
+      // Extract entity type from endpoint path
+      const pathMatch = endpoint.match(/\/api\/crm\/([^\/\s]+)/);
+      if (!pathMatch) continue;
+      
+      const entityType = pathMatch[1].toLowerCase();
+      
+      if (!entityGroups[entityType]) {
+        entityGroups[entityType] = [];
+      }
+      
+      entityGroups[entityType].push(rel);
+    }
+    
+    // Create directory for entity files
+    const entityDir = path.join(dataDir, 'relationships-by-entity');
+    if (!fsSync.existsSync(entityDir)) {
+      fsSync.mkdirSync(entityDir, { recursive: true });
+    }
+    
+    // Save each entity to a separate file
+    for (const [entityType, entityRelations] of Object.entries(entityGroups)) {
+      const outputPath = path.join(entityDir, `${entityType}.json`);
+      fsSync.writeFileSync(outputPath, JSON.stringify(entityRelations, null, 2));
+    }
+    
+    // Save summary
+    const summary = {
+      generatedAt: new Date().toISOString(),
+      totalRelations: relationships.length,
+      entities: Object.keys(entityGroups).map(entity => ({
+        entity,
+        count: entityGroups[entity].length
+      }))
+    };
+    fsSync.writeFileSync(
+      path.join(entityDir, 'summary.json'),
+      JSON.stringify(summary, null, 2)
+    );
+    
+    console.log(`  📂 Saved ${Object.keys(entityGroups).length} entity files in data/relationships-by-entity/`);
   }
 }
 

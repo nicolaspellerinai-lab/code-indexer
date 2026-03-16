@@ -89,23 +89,39 @@ class OpenAPIGenerator {
    */
   buildOperation(endpoint) {
     const swagger = endpoint.swagger || {};
+    const llmEnrichment = endpoint.llmEnrichment || {};
+    
+    // Utiliser les données LLM enrichies si disponibles
+    const useLLM = Object.keys(llmEnrichment).length > 0;
     
     const operation = {
-      tags: swagger.tags || this.guessTagFromPath(endpoint.path),
-      summary: swagger.summary || endpoint.handler?.name || '',
-      description: swagger.description || '',
+      tags: (useLLM ? llmEnrichment.tags : null) || swagger.tags || this.guessTagFromPath(endpoint.path),
+      summary: (useLLM ? llmEnrichment.summary : null) || swagger.summary || endpoint.handler?.name || '',
+      description: (useLLM ? llmEnrichment.description : null) || swagger.description || '',
       operationId: this.generateOperationId(endpoint),
-      deprecated: swagger.deprecated || false,
-      parameters: this.buildParameters(swagger.parameters || endpoint.parameters),
-      responses: this.buildResponses(swagger.responses),
-      security: swagger.security || [{ bearerAuth: [] }]
+      deprecated: (useLLM ? llmEnrichment.deprecated : null) || swagger.deprecated || false,
+      parameters: this.buildParameters(
+        (useLLM ? llmEnrichment.inputSchema : null) || swagger.parameters || endpoint.parameters,
+        (useLLM ? llmEnrichment.headerParameters : null) || []
+      ),
+      responses: (useLLM ? llmEnrichment.responses : null) || swagger.responses || {},
+      security: (useLLM ? llmEnrichment.security : null) || swagger.security || [{ bearerAuth: [] }]
     };
     
     // Request body pour POST/PUT/PATCH
     if (['post', 'put', 'patch'].includes(endpoint.method?.toLowerCase())) {
-      const requestBody = this.buildRequestBody(swagger.requestBody);
+      const requestBody = this.buildRequestBody(
+        (useLLM ? llmEnrichment.inputSchema?.body : null) || swagger.requestBody
+      );
       if (requestBody) {
         operation.requestBody = requestBody;
+      }
+    }
+    
+    // Ajouter les définitions si présentes dans llmEnrichment
+    if (useLLM && llmEnrichment.definitions) {
+      for (const [name, schema] of Object.entries(llmEnrichment.definitions)) {
+        this.addSchema(name, schema);
       }
     }
     
@@ -121,25 +137,85 @@ class OpenAPIGenerator {
   }
 
   /**
-   * Construit les paramètres
+   * Construit les paramètres (incluant les header parameters)
    */
-  buildParameters(params) {
-    if (!params || params.length === 0) return [];
+  buildParameters(inputSchema, headerParameters = []) {
+    const params = [];
     
-    return params.map(param => ({
-      name: param.name,
-      in: param.in || 'query',
-      description: param.description || '',
-      required: param.required || false,
-      schema: param.schema || { type: param.type || 'string' },
-      example: param.example
-    }));
+    // Ajouter les header parameters
+    for (const header of headerParameters) {
+      params.push({
+        name: header.name,
+        in: 'header',
+        description: header.description || '',
+        required: header.required || false,
+        schema: header.schema || { type: header.type || 'string' },
+        example: header.example
+      });
+    }
+    
+    // Si inputSchema est un objet avec path/query/body
+    if (inputSchema && typeof inputSchema === 'object') {
+      // Path parameters
+      if (inputSchema.path) {
+        for (const [name, param] of Object.entries(inputSchema.path)) {
+          params.push({
+            name,
+            in: 'path',
+            description: param.description || '',
+            required: param.required !== false,
+            schema: param.schema || { type: param.type || 'string' },
+            example: param.example
+          });
+        }
+      }
+      
+      // Query parameters
+      if (inputSchema.query) {
+        for (const [name, param] of Object.entries(inputSchema.query)) {
+          params.push({
+            name,
+            in: 'query',
+            description: param.description || '',
+            required: param.required || false,
+            schema: param.schema || { type: param.type || 'string' },
+            example: param.example
+          });
+        }
+      }
+    } else if (Array.isArray(inputSchema)) {
+      // Legacy array format
+      for (const param of inputSchema) {
+        params.push({
+          name: param.name,
+          in: param.in || 'query',
+          description: param.description || '',
+          required: param.required || false,
+          schema: param.schema || { type: param.type || 'string' },
+          example: param.example
+        });
+      }
+    }
+    
+    return params.length > 0 ? params : [];
   }
 
   /**
    * Construit le requestBody
    */
   buildRequestBody(requestBody) {
+    // Si requestBody est un schéma directement (depuis llmEnrichment.inputSchema.body)
+    if (requestBody && requestBody.type === 'object' && requestBody.properties) {
+      return {
+        required: true,
+        content: {
+          'application/json': {
+            schema: requestBody
+          }
+        }
+      };
+    }
+    
     if (!requestBody) {
       return {
         required: true,
