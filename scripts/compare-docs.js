@@ -6,7 +6,8 @@ const args = process.argv.slice(2);
 const options = {
   openAPI: null,
   routeFile: null,
-  output: null
+  output: null,
+  markdown: null
 };
 
 for (let i = 0; i < args.length; i++) {
@@ -18,6 +19,9 @@ for (let i = 0; i < args.length; i++) {
     i++;
   } else if (args[i] === '--output' && args[i + 1]) {
     options.output = args[i + 1];
+    i++;
+  } else if (args[i] === '--markdown' && args[i + 1]) {
+    options.markdown = args[i + 1];
     i++;
   }
 }
@@ -215,6 +219,16 @@ let paramsImproved = 0;
 let schemasImproved = 0;
 let responsesImproved = 0;
 
+// Store markdown report data
+const markdownReport = {
+  header: `# Rapport de Comparaison de Documentation\n\n**Date:** ${new Date().toLocaleString()}\n**Fichier OpenAPI:** ${openAPIPath}\n**Fichier routes:** ${routeFilePath}\n`,
+  stats: [],
+  improvedRoutes: [],
+  unchangedRoutes: [],
+  newRoutes: [],
+  routesWithoutDocs: []
+};
+
 // Compare each path
 for (const [pathKey, methods] of Object.entries(openAPIData.paths)) {
   for (const [method, spec] of Object.entries(methods)) {
@@ -275,10 +289,28 @@ for (const [pathKey, methods] of Object.entries(openAPIData.paths)) {
         if (responseCompare.added.length > 0) {
           console.log(`   📝 Responses ajoutées: ${responseCompare.added.join(', ')}`);
         }
+        
+        // Add to markdown report
+        markdownReport.improvedRoutes.push({
+          method: method.toUpperCase(),
+          path: pathKey,
+          original: originalSummary,
+          generated: generatedSummary,
+          paramsAdded: paramCompare.added,
+          bodyAdded: inputSchemaCompare.added,
+          responsesAdded: responseCompare.added
+        });
       } else {
         unchanged++;
         console.log(`\n➡️  IDENTIQUE/SIMILAIRE: ${method.toUpperCase()} ${pathKey}`);
         console.log(`   ${generatedSummary}`);
+        
+        // Add to markdown report
+        markdownReport.unchangedRoutes.push({
+          method: method.toUpperCase(),
+          path: pathKey,
+          summary: generatedSummary
+        });
       }
     } else {
       // New route without original docs
@@ -296,6 +328,16 @@ for (const [pathKey, methods] of Object.entries(openAPIData.paths)) {
       if (spec.responses) {
         console.log(`   📝 Responses: ${Object.keys(spec.responses).join(', ')}`);
       }
+      
+      // Add to markdown report
+      markdownReport.newRoutes.push({
+        method: method.toUpperCase(),
+        path: pathKey,
+        summary: spec.summary?.substring(0, 80),
+        params: spec.parameters?.map(p => p.name) || [],
+        body: spec.requestBody?.content?.['application/json']?.schema?.properties ? Object.keys(spec.requestBody.content['application/json'].schema.properties) : [],
+        responses: spec.responses ? Object.keys(spec.responses) : []
+      });
     }
   }
 }
@@ -333,6 +375,85 @@ if (options.output) {
   console.log(`\n💾 Rapport sauvegardé: ${options.output}`);
 }
 
+// Generate markdown report
+let markdownOutput = markdownReport.header;
+
+// Statistics section
+markdownOutput += `## 📈 Statistiques\n\n`;
+markdownOutput += `| Métrique | Valeur |\n`;
+markdownOutput += `|----------|--------|\n`;
+markdownOutput += `| Routes générées | ${totalGenerated} |\n`;
+markdownOutput += `| Avec docs originaux | ${totalWithOriginal} |\n`;
+markdownOutput += `| Améliorées par LLM | ${improved} |\n`;
+markdownOutput += `| Identiques | ${unchanged} |\n`;
+markdownOutput += `| Nouvelles (sans doc original) | ${totalGenerated - totalWithOriginal} |\n`;
+markdownOutput += `| Params améliorés | ${paramsImproved} |\n`;
+markdownOutput += `| Schemas améliorés | ${schemasImproved} |\n`;
+markdownOutput += `| Responses améliorés | ${responsesImproved} |\n`;
+markdownOutput += `\n`;
+
+// Improved routes section
+if (markdownReport.improvedRoutes.length > 0) {
+  markdownOutput += `## ✅ Routes Améliorées\n\n`;
+  for (const route of markdownReport.improvedRoutes) {
+    markdownOutput += `### ${route.method} ${route.path}\n\n`;
+    if (route.original) {
+      markdownOutput += `**Original:** ${route.original}\n\n`;
+    }
+    markdownOutput += `**Généré:** ${route.generated}\n\n`;
+    if (route.paramsAdded.length > 0) {
+      markdownOutput += `📝 Params ajoutés: ${route.paramsAdded.join(', ')}\n\n`;
+    }
+    if (route.bodyAdded.length > 0) {
+      markdownOutput += `📝 Schema body ajouté: ${route.bodyAdded.join(', ')}\n\n`;
+    }
+    if (route.responsesAdded.length > 0) {
+      markdownOutput += `📝 Responses ajoutées: ${route.responsesAdded.join(', ')}\n\n`;
+    }
+    markdownOutput += `---\n\n`;
+  }
+}
+
+// New routes section
+if (markdownReport.newRoutes.length > 0) {
+  markdownOutput += `## 🆕 Nouvelles Routes\n\n`;
+  markdownOutput += `| Méthode | Chemin | Summary | Params | Body | Responses |\n`;
+  markdownOutput += `|---------|--------|---------|--------|------|-----------|\n`;
+  for (const route of markdownReport.newRoutes) {
+    markdownOutput += `| ${route.method} | ${route.path} | ${route.summary || '-'} | ${route.params.join(', ') || '-'} | ${route.body.join(', ') || '-'} | ${route.responses.join(', ') || '-'} |\n`;
+  }
+  markdownOutput += `\n`;
+}
+
+// Unchanged routes section
+if (markdownReport.unchangedRoutes.length > 0) {
+  markdownOutput += `## ➡️ Routes Identiques/Similaires\n\n`;
+  for (const route of markdownReport.unchangedRoutes) {
+    markdownOutput += `- **${route.method} ${route.path}**: ${route.summary}\n`;
+  }
+  markdownOutput += `\n`;
+}
+
+// Routes without documentation section
+if (markdownReport.routesWithoutDocs.length > 0) {
+  markdownOutput += `## 📝 Routes Sans Documentation Originale\n\n`;
+  for (const route of markdownReport.routesWithoutDocs) {
+    markdownOutput += `- ${route}\n`;
+  }
+  markdownOutput += `\n`;
+}
+
+// Determine markdown output path
+const defaultMarkdownPath = options.output 
+  ? options.output.replace(/\.json$/, '.md')
+  : path.join(__dirname, '..', 'data', 'comparison-report.md');
+
+const markdownPath = options.markdown || defaultMarkdownPath;
+
+// Save markdown report
+fs.writeFileSync(markdownPath, markdownOutput);
+console.log(`💾 Rapport Markdown sauvegardé: ${markdownPath}`);
+
 // List routes that could use improvement (have original but brief)
 console.log('\n' + '='.repeat(80));
 console.log('\n📝 ROUTES SANS DOCUMENTATION ORIGINALE:\n');
@@ -345,6 +466,9 @@ for (const [pathKey, methods] of Object.entries(openAPIData.paths)) {
     
     if (!original || (!original.summary && !original.description && !original.parameters && !original.responses)) {
       console.log(`   ${method.toUpperCase()} ${pathKey}`);
+      
+      // Add to markdown report
+      markdownReport.routesWithoutDocs.push(`${method.toUpperCase()} ${pathKey}`);
     }
   }
 }
@@ -353,11 +477,13 @@ console.log('\n' + '='.repeat(80));
 console.log('\n📖 UTILISATION:\n');
 console.log('   node scripts/compare-docs.js [options]\n');
 console.log('   Options:');
-console.log('   --openapi <path>  Fichier OpenAPI généré (défaut: data/generated-openapi.json)');
-console.log('   --routes <path>   Fichier routes source (défaut: data/routes.json)');
-console.log('   --output <path>  Sauvegarder le rapport en JSON');
+console.log('   --openapi <path>   Fichier OpenAPI généré (défaut: data/generated-openapi.json)');
+console.log('   --routes <path>    Fichier routes source (défaut: data/routes.json)');
+console.log('   --output <path>   Sauvegarder le rapport en JSON');
+console.log('   --markdown <path> Sauvegarder le rapport en Markdown');
 console.log('\n   Exemples:');
 console.log('   node scripts/compare-docs.js');
 console.log('   node scripts/compare-docs.js --openapi data/generated-openapi.json --routes code/my-routes.js');
 console.log('   node scripts/compare-docs.js --output data/comparison-report.json');
+console.log('   node scripts/compare-docs.js --markdown data/comparison-report.md');
 console.log('\n✅ Terminé!');

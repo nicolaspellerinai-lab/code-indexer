@@ -46,9 +46,26 @@ async function reset() {
         }
     }
     
-    // Recrée les dossiers vides
-    await fs.mkdir(DATA_DIR, { recursive: true });
-    await fs.mkdir(CHROMA_DIR, { recursive: true });
+    // Recrée les dossiers vides avec retry pour Windows
+    const recreateDir = async (dirPath, name) => {
+      for (let i = 0; i < 3; i++) {
+        try {
+          await fs.mkdir(dirPath, { recursive: true });
+          console.log(`✅ Created: ${name}/`);
+          return;
+        } catch (e) {
+          if (i < 2) {
+            // Wait a bit and retry (Windows needs time to release file handles)
+            await new Promise(resolve => setTimeout(resolve, 100));
+          } else {
+            console.error(`❌ Error creating ${name}/:`, e.message);
+          }
+        }
+      }
+    };
+    
+    await recreateDir(DATA_DIR, 'data');
+    await recreateDir(CHROMA_DIR, 'chroma-data');
     
     console.log('\n' + '='.repeat(50));
     console.log(`Deleted: ${deletedCount} directories`);

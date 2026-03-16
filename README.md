@@ -50,7 +50,8 @@ npm install
 ### Documentation et comparison
 - `node scripts/compare-docs.js` : Compare doc originale vs enrichie (params, schemas, responses)
 - `node scripts/generate-patch.js` : Génère les patches de modification
-- `node scripts/generate-doc.js` : Génère la documentation
+- `node scripts/generate-doc.js` : Génère/régénère la documentation
+- `node scripts/run-all.js` : Exécute tout le pipeline en une commande
 
 ### Options CLI
 
@@ -60,6 +61,7 @@ node scripts/compare-docs.js [options]
   --openapi <path>  Fichier OpenAPI généré (défaut: data/generated-openapi.json)
   --routes <path>   Fichier routes source (défaut: data/routes.json)
   --output <path>  Sauvegarder le rapport en JSON
+  --markdown <path> Sauvegarder le rapport en Markdown (défaut: data/comparison-report.md)
 ```
 
 #### generate-patch.js
@@ -68,6 +70,25 @@ node scripts/generate-patch.js [options]
   --openapi <path>  Fichier OpenAPI généré (défaut: data/generated-openapi.json)
   --routes <path>   Fichier routes source (défaut: data/routes.json)
   --output <path>  Préfixe des fichiers de sortie (défaut: data/patches)
+```
+
+#### generate-doc.js
+```bash
+node scripts/generate-doc.js [options]
+  --routes <path>   Fichier routes source (défaut: data/routes.json)
+  --output <path>  Fichier de sortie (défaut: data/generated-openapi.json)
+  --format <type>  Format de sortie (défaut: openapi)
+```
+
+#### run-all.js
+```bash
+node scripts/run-all.js <project-path> [options]
+  <project-path>    Chemin du projet à indexer
+  --host <url>      Hôte Ollama
+  --port <port>    Port Ollama (défaut: 11434)
+  --model <name>   Modèle Ollama
+  --skip-llm       Ignorer l'enrichissement LLM
+  --steps <steps>   Étapes (1,2,3 ou all - défaut: all)
 ```
 
 #### index-project.js
@@ -111,68 +132,6 @@ Les modèles à tester sont configurés dans `config/llm-providers.json` :
   }
 }
 ```
-
-## Exemple d'utilisation
-
-```bash
-# Reset avant nouvelle indexation
-node scripts/reset.js --force
-
-# Indexer un fichier spécifique
-node scripts/index-project.js code_to_index/elector.js
-
-# Indexer un répertoire entier (traite tous les fichiers .js)
-node scripts/index-project.js code_to_index/
-
-# Indexer avec paramètres Ollama personnalisés
-node scripts/index-project.js code_to_index/ --host http://192.168.0.19:11434 --model deepseek-v2:16b
-
-# Tester un endpoint spécifique
-node scripts/test-single-endpoint.js code_to_index/elector.js GET:/api/crm/elector/street-section
-
-# Comparer la documentation (avec paramètres par défaut)
-node scripts/compare-docs.js
-
-# Comparer avec fichiers personnalisés
-node scripts/compare-docs.js --openapi data/generated-openapi.json --routes data/routes.json
-
-# Sauvegarder le rapport de comparaison
-node scripts/compare-docs.js --output data/comparison-report.json
-
-# Générer les patches (supporte multi-fichiers automatiquement)
-node scripts/generate-patch.js
-
-# Générer les patches avec sortie personnalisée
-node scripts/generate-patch.js --output output/my-patches
-
-# Rechercher des endpoints
-node scripts/search-endpoints.js 'users'
-
-# Tester Ollama
-node scripts/test-ollama.js
-```
-
-## Workflow complet
-
-### Indexation de répertoire multi-fichiers
-
-```bash
-# 1. Reset et indexation
-node scripts/reset.js --force
-node scripts/index-project.js code_to_index/
-
-# 2. Comparaison de la documentation
-node scripts/compare-docs.js
-
-# 3. Génération des patches
-node scripts/generate-patch.js
-```
-
-Le système :
-- Parse tous les fichiers `.js` du répertoire
-- Conserve le chemin source pour chaque route (`routes-by-file.json`)
-- Génère les patches avec les bons chemins de fichiers
-- Produit un résumé par fichier source
 
 ## Fonctionnement de l'enrichissement LLM
 
@@ -231,6 +190,56 @@ node scripts/index-project.js code_to_index/
 ```
 
 Les fichiers `routes-by-file.json` et `routes.json` conservent le lien avec les fichiers sources, permettant de générer des patches corrects même pour des projets avec plusieurs fichiers de routes.
+
+## Workflow Complet
+
+### Pipeline unifié (run-all.js)
+
+Pour exécuter tout le pipeline en une commande :
+
+```bash
+# Exécuter toutes les étapes
+node scripts/run-all.js code_to_index/
+
+# Skip l'enrichissement LLM (plus rapide)
+node scripts/run-all.js code_to_index/ --skip-llm
+
+# Exécuter seulement certaines étapes
+node scripts/run-all.js code_to_index/ --steps 1,2  # Indexation + Comparaison
+node scripts/run-all.js code_to_index/ --steps 3     # Génération patches seulement
+
+# Reprendre depuis une étape précédente
+node scripts/run-all.js code_to_index/ --no-resume
+```
+
+Le pipeline unifié génère automatiquement tous les fichiers de sortie.
+
+### Étapes manuelles
+
+Sinon, vous pouvez exécuter chaque étape séparément :
+
+```bash
+# 1. Indexation (parsing + enrichissement LLM)
+node scripts/index-project.js code_to_index/
+
+# 2. Comparaison de la documentation
+node scripts/compare-docs.js
+
+# 3. Génération des patches
+node scripts/generate-patch.js
+```
+
+### generate-doc.js
+
+Ce script permet de régénérer la documentation OpenAPI à partir des routes sauvegardées :
+
+```bash
+# Générer avec les paramètres par défaut
+node scripts/generate-doc.js
+
+# Spécifier un fichier de routes personnalisé
+node scripts/generate-doc.js --routes data/routes.json --output data/my-api.json
+```
 
 ## Frameworks supportés
 

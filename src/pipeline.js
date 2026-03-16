@@ -6,7 +6,58 @@ const fs = require('fs').promises;
 const fsSync = require('fs');
 const path = require('path');
 
-// Load Ollama config
+// Helper function to write file with retry for Windows
+async function writeFileRetry(filePath, data) {
+  // First try to delete the file if it exists (helps with locked files)
+  try {
+    await fs.unlink(filePath);
+  } catch (e) {
+    // File might not exist, that's fine
+  }
+  
+  for (let i = 0; i < 5; i++) {
+    try {
+      await fs.writeFile(filePath, data);
+      return;
+    } catch (e) {
+      if (i < 4) {
+        await new Promise(resolve => setTimeout(resolve, 300));
+      } else {
+        throw e;
+      }
+    }
+  }
+}
+
+// Helper function to ensure data directory exists with retry for Windows
+async function ensureDataDir() {
+  const dataDir = path.join(process.cwd(), 'data');
+  
+  for (let i = 0; i < 5; i++) {
+    try {
+      // Try to access the directory first
+      await fs.access(dataDir);
+      // Directory exists and is accessible
+      return dataDir;
+    } catch (e) {
+      // Directory doesn't exist or not accessible
+      try {
+        await fs.mkdir(dataDir, { recursive: true });
+        return dataDir;
+      } catch (mkdirErr) {
+        if (i < 4) {
+          // Wait longer and retry
+          await new Promise(resolve => setTimeout(resolve, 200));
+        }
+      }
+    }
+  }
+  
+  // Last resort - return the path anyway
+  return dataDir;
+}
+
+// Load Ollama config - use __dirname to find code-indexer config
 function loadLlmConfig() {
   const configPath = path.join(__dirname, '..', 'config', 'llm-providers.json');
   try {
@@ -20,9 +71,9 @@ function loadLlmConfig() {
   return { ollama: { host: 'localhost', port: 11434, models: [] } };
 }
 
-// Progress tracking
-const PROGRESS_FILE = path.join(__dirname, '..', 'data', 'indexing-progress.json');
-const QUEUE_FILE = path.join(__dirname, '..', 'data', 'indexing-queue.json');
+// Progress tracking - use process.cwd() to be consistent with data directory
+const PROGRESS_FILE = path.join(process.cwd(), 'data', 'indexing-progress.json');
+const QUEUE_FILE = path.join(process.cwd(), 'data', 'indexing-queue.json');
 
 function loadProgress() {
   try {
@@ -92,8 +143,19 @@ class IndexingPipeline {
     }
     
     // Override config with command-line options if provided
-    const host = this.options.host || configHost;
-    const port = this.options.port || configPort;
+    let host = this.options.host || configHost;
+    let port = this.options.port || configPort;
+    
+    // If host already contains a port (e.g., from command line), don't add it again
+    if (this.options.host && this.options.host.includes(':')) {
+      try {
+        const url = new URL(this.options.host);
+        host = this.options.host;
+        port = url.port || port; // Use the port from the URL if present
+      } catch (e) {
+        // Invalid URL, use as-is
+      }
+    }
     const model = this.options.model || ollamaConfig.models?.[0] || 'deepseek-v2:16b';
     
     console.log(`  📡 Ollama config: ${host}:${port} (model: ${model})`);
@@ -111,22 +173,66 @@ class IndexingPipeline {
 
     // Phase 1: Parse routes
     console.log('Phase 1: Parsing routes...');
-    const routeFiles = await this.parser.findRouteFiles();
-    console.log(`  Found ${routeFiles.length} route files`);
     
-    // Parse each file and append routes (don't reset between files)
-    for (let i = 0; i < routeFiles.length; i++) {
-      const file = routeFiles[i];
-      const append = i > 0; // Append routes from 2nd file onwards
-      await this.parser.parseFile(file, append);
+    // Check for existing parsed routes (intermediate save from previous run)
+    const routesDataPath = path.join(process.cwd(), 'data', 'routes.json');
+    let existingRoutes = null;
+    
+    if (resume && fsSync.existsSync(routesDataPath)) {
+      try {
+        existingRoutes = JSON.parse(fsSync.readFileSync(routesDataPath, 'utf-8'));
+        console.log(`  ♻️  Loaded ${existingRoutes.length} previously parsed routes`);
+      } catch (e) {
+        console.warn('  ⚠️ Could not load existing routes, re-parsing...');
+      }
     }
+    
+    if (!existingRoutes) {
+      const routeFiles = await this.parser.findRouteFiles();
+      console.log(`  Found ${routeFiles.length} route files`);
+      
+      // Parse each file and append routes (don't reset between files)
+      for (let i = 0; i < routeFiles.length; i++) {
+        const file = routeFiles[i];
+        const append = i > 0; // Append routes from 2nd file onwards
+        await this.parser.parseFile(file, append);
+      }
+    } else {
+      // Use loaded routes
+      this.parser.routes = existingRoutes;
+      this.parser.endpoints = existingRoutes;
+    }
+    
     console.log(`  ✅ Parsed ${this.parser.routes.length} routes\n`);
-
+    
+    // Save intermediate: parsed routes
+    await this.saveParsedRoutes(this.parser.routes);
+    
     // Phase 2: Analyze dependencies
     console.log('Phase 2: Analyzing dependencies...');
-    this.analyzer = new DependencyAnalyzer(this.parser.routes, this.projectPath);
-    const relationships = this.analyzer.analyze();
+    
+    // Check for existing relationships (intermediate save from previous run)
+    const relationshipsDataPath = path.join(process.cwd(), 'data', 'relationships.json');
+    let relationships = null;
+    
+    if (resume && fsSync.existsSync(relationshipsDataPath)) {
+      try {
+        relationships = JSON.parse(fsSync.readFileSync(relationshipsDataPath, 'utf-8'));
+        console.log(`  ♻️  Loaded ${relationships.length} previously analyzed relationships`);
+      } catch (e) {
+        console.warn('  ⚠️ Could not load existing relationships, re-analyzing...');
+      }
+    }
+    
+    if (!relationships) {
+      this.analyzer = new DependencyAnalyzer(this.parser.routes, this.projectPath);
+      relationships = this.analyzer.analyze();
+    }
+    
     console.log(`  ✅ Found ${relationships.length} relationships\n`);
+    
+    // Save intermediate: relationships
+    await this.saveRelationships(relationships);
 
     // Phase 3: LLM Enrichment with progress tracking
     console.log('Phase 3: Enriching with LLM...');
@@ -191,6 +297,26 @@ class IndexingPipeline {
       } else {
         // Fresh start - use simple batch processing
         console.log('  🆕 Starting fresh indexing...');
+        
+        // Set up progress callback to save after each route
+        const self = this;
+        let processedCount = 0;
+        const allEnriched = [];
+        
+        this.enricher.onProgress = async function(current, total, enriched) {
+          processedCount = current;
+          allEnriched.push(enriched);
+          
+          // Save progress after each route
+          saveProgress({
+            projectPath: self.projectPath,
+            timestamp: new Date().toISOString(),
+            processed: processedCount,
+            total: total,
+            enrichedRoutes: allEnriched
+          });
+        };
+        
         enrichedRoutes = await this.enricher.enrichEndpointsBatch(this.parser.routes);
         
         // Save final progress
@@ -311,9 +437,48 @@ class IndexingPipeline {
     };
   }
 
+  // Save intermediate parsed routes (after Phase 1)
+  async saveParsedRoutes(routes) {
+    const dataDir = await ensureDataDir();
+    
+    // Save routes.json (without enrichment)
+    await writeFileRetry(
+      path.join(dataDir, 'routes.json'),
+      JSON.stringify(routes, null, 2)
+    );
+    
+    // Group by file for multi-file support
+    const routesByFile = {};
+    for (const route of routes) {
+      const file = route.file || 'unknown';
+      if (!routesByFile[file]) {
+        routesByFile[file] = [];
+      }
+      routesByFile[file].push(route);
+    }
+    await fs.writeFile(
+      path.join(dataDir, 'routes-by-file.json'),
+      JSON.stringify(routesByFile, null, 2)
+    );
+    
+    console.log('  💾 Saved intermediate: data/routes.json');
+    console.log('  💾 Saved intermediate: data/routes-by-file.json');
+  }
+
+  // Save intermediate relationships (after Phase 2)
+  async saveRelationships(relationships) {
+    const dataDir = await ensureDataDir();
+    
+    await writeFileRetry(
+      path.join(dataDir, 'relationships.json'),
+      JSON.stringify(relationships, null, 2)
+    );
+    
+    console.log('  💾 Saved intermediate: data/relationships.json');
+  }
+
   async saveResults(relationships, openAPI, routes) {
-    const dataDir = path.join(process.cwd(), 'data');
-    await fs.mkdir(dataDir, { recursive: true });
+    const dataDir = await ensureDataDir();
 
     // Map routes by their endpoint signature for quick lookup
     // Key format: "METHOD /path" (case-insensitive for method, case-sensitive for path)
@@ -342,20 +507,20 @@ class IndexingPipeline {
     });
 
     // Save relationships with LLM enrichment
-    await fs.writeFile(
+    await writeFileRetry(
       path.join(dataDir, 'relationships.json'),
       JSON.stringify(enrichedRelationships, null, 2)
     );
 
     // Save OpenAPI spec
-    await fs.writeFile(
+    await writeFileRetry(
       path.join(dataDir, 'generated-openapi.json'),
       JSON.stringify(openAPI, null, 2)
     );
 
     // Save routes with source file information for patch generation
     // Include full route objects with file paths for multi-file support
-    await fs.writeFile(
+    await writeFileRetry(
       path.join(dataDir, 'routes.json'),
       JSON.stringify(routes, null, 2)
     );
@@ -369,15 +534,15 @@ class IndexingPipeline {
       }
       routesByFile[file].push(route);
     }
-    await fs.writeFile(
+    await writeFileRetry(
       path.join(dataDir, 'routes-by-file.json'),
       JSON.stringify(routesByFile, null, 2)
     );
 
     console.log('  📄 Saved: data/relationships.json');
     console.log('  📄 Saved: data/generated-openapi.json');
-    console.log('  📄 Saved: data/routes.json (full routes with file paths)');
-    console.log('  📄 Saved: data/routes-by-file.json (routes grouped by source file)');
+    console.log('  📄 Saved: data/routes.json (final with enrichment)');
+    console.log('  📄 Saved: data/routes-by-file.json (final with enrichment)');
   }
 }
 
